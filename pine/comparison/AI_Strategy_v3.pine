@@ -1,0 +1,129 @@
+//@version=5
+strategy("AI Gold Quant Engine v3 (MLP_NeuralNet)", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.02)
+
+// --- 1. VOLATILITY & REGIME FEATURE ENGINEERING ---
+pine_rma(src, length) =>
+    alpha = 1.0 / length
+    var float sum = na
+    sum := na(sum[1]) ? ta.sma(src, length) : alpha * src + (1.0 - alpha) * nz(sum[1])
+    sum
+
+atr14 = pine_rma(ta.tr(true), 14)
+atr_pct = (atr14 / close) + 1e-10
+
+f1 = ((close - close[1]) / close[1]) / atr_pct
+f2 = ((close - nz(close[4], close[1])) / nz(close[4], close[1])) / atr_pct
+f3 = ((close - nz(close[12], close[1])) / nz(close[12], close[1])) / atr_pct
+
+delta = close - close[1]
+gain = delta > 0 ? delta : 0.0
+loss = delta < 0 ? -delta : 0.0
+
+rs14 = pine_rma(loss, 14) == 0 ? 0.0 : pine_rma(gain, 14) / pine_rma(loss, 14)
+rsi14 = 100.0 - (100.0 / (1.0 + rs14))
+f4 = (rsi14 - 50.0) / 50.0
+
+rs5 = pine_rma(loss, 5) == 0 ? 0.0 : pine_rma(gain, 5) / pine_rma(loss, 5)
+rsi5 = 100.0 - (100.0 / (1.0 + rs5))
+f5 = (rsi5 - 50.0) / 50.0
+
+sma20 = ta.sma(close, 20)
+std20 = ta.stdev(close, 20)
+upper_b = sma20 + 2.0 * std20
+lower_b = sma20 - 2.0 * std20
+f6 = upper_b == lower_b ? 0.5 : (close - lower_b) / (upper_b - lower_b)
+
+ema50 = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+f7 = ((close - ema50) / close) / atr_pct
+f8 = ((ema50 - ema200) / close) / atr_pct
+
+// Kaufman Efficiency Ratio (10)
+net_move = math.abs(close - nz(close[10], close[1]))
+sum_moves = math.sum(math.abs(close - close[1]), 10)
+f9 = sum_moves == 0 ? 0.0 : net_move / sum_moves
+
+vol_sma4 = ta.sma(volume, 4)
+vol_sma20 = ta.sma(volume, 20)
+f10 = vol_sma20 == 0 ? 1.0 : vol_sma4 / vol_sma20
+
+// --- 2. FEATURE SCALING ---
+s1 = (f1 - 0.00510880) / 0.78241554
+s2 = (f2 - 0.02865354) / 1.48167441
+s3 = (f3 - 0.09131873) / 2.44930028
+s4 = (f4 - 0.01120591) / 0.24758735
+s5 = (f5 - 0.01227077) / 0.39161722
+s6 = (f6 - 0.50652020) / 0.34118977
+s7 = (f7 - 0.17154653) / 2.50628048
+s8 = (f8 - 0.29721095) / 4.56555208
+s9 = (f9 - 0.31895888) / 0.22356850
+s10 = (f10 - 1.04430410) / 0.66412238
+
+// --- 3. WINNING MODEL INFERENCE (MLP_NeuralNet) ---
+h0 = math.max(0.0, 0.26400295 + (s1 * 0.01954751) + (s2 * -0.04233875) + (s3 * 0.01240774) + (s4 * -0.05805351) + (s5 * -0.17220525) + (s6 * -0.08891006) + (s7 * -0.02177582) + (s8 * -0.05899802) + (s9 * -0.06512771) + (s10 * -0.11151795))
+h1 = math.max(0.0, 0.10507742 + (s1 * 0.04517380) + (s2 * -0.00985580) + (s3 * -0.07038370) + (s4 * 0.05585635) + (s5 * 0.08772619) + (s6 * 0.04820422) + (s7 * 0.04720829) + (s8 * -0.00464676) + (s9 * 0.08067528) + (s10 * -0.03624962))
+h2 = math.max(0.0, -0.15718995 + (s1 * -0.04541995) + (s2 * -0.17126037) + (s3 * -0.02847822) + (s4 * -0.08676027) + (s5 * 0.04496038) + (s6 * -0.36040995) + (s7 * 0.20359381) + (s8 * -0.23969031) + (s9 * -0.21334125) + (s10 * 0.03958372))
+h3 = math.max(0.0, -0.42530414 + (s1 * 0.01192313) + (s2 * 0.18301651) + (s3 * 0.06955098) + (s4 * 0.05347267) + (s5 * 0.09039528) + (s6 * 0.04420111) + (s7 * 0.12774870) + (s8 * -0.00673624) + (s9 * -0.00303802) + (s10 * 0.12359011))
+h4 = math.max(0.0, -0.33030991 + (s1 * -0.00866897) + (s2 * 0.08181147) + (s3 * 0.06336353) + (s4 * 0.12683296) + (s5 * -0.06063656) + (s6 * -0.10609401) + (s7 * 0.27424975) + (s8 * 0.22116201) + (s9 * -0.12069307) + (s10 * -0.09310727))
+h5 = math.max(0.0, -0.24758380 + (s1 * -0.00000000) + (s2 * -0.00000000) + (s3 * -0.00000000) + (s4 * -0.00000000) + (s5 * -0.00000000) + (s6 * 0.00000000) + (s7 * 0.00000000) + (s8 * 0.00000000) + (s9 * 0.00000000) + (s10 * -0.00000000))
+h6 = math.max(0.0, -0.11178546 + (s1 * -0.13244046) + (s2 * -0.07171501) + (s3 * -0.11663784) + (s4 * -0.01399038) + (s5 * 0.03762672) + (s6 * -0.10408523) + (s7 * 0.04480518) + (s8 * 0.08414276) + (s9 * 0.09868317) + (s10 * 0.17945029))
+h7 = math.max(0.0, 0.35237439 + (s1 * -0.01988754) + (s2 * -0.02930798) + (s3 * -0.10265931) + (s4 * -0.01519124) + (s5 * -0.03135391) + (s6 * -0.05170845) + (s7 * 0.06080960) + (s8 * -0.06280249) + (s9 * -0.02148605) + (s10 * -0.14379269))
+out_raw = -0.06122073 + (h0 * 0.24720608) + (h1 * -0.12027674) + (h2 * -0.40179097) + (h3 * 0.22850394) + (h4 * 0.40310157) + (h5 * -0.00356521) + (h6 * 0.28165611) + (h7 * -0.16235345)
+prob_up = 1.0 / (1.0 + math.exp(-out_raw))
+
+// --- 4. TRIPLE-BARRIER EXECUTION & RISK ENGINE ---
+UP_TH = 0.58
+DN_TH = 0.42
+HORIZON = 12
+TP_MULT = 3.0
+SL_MULT = 1.5
+ALLOW_SHORT = false
+
+is_up = prob_up >= UP_TH and f8 > -0.5 and f9 > 0.15
+is_down = ALLOW_SHORT and (prob_up <= DN_TH and f8 < -0.5 and f9 > 0.20)
+
+var int entry_bar = na
+var float tp_level = na
+var float sl_level = na
+
+if barstate.isconfirmed and strategy.position_size == 0
+    if is_up
+        strategy.entry("AI Long", strategy.long, comment="UP " + str.tostring(math.round(prob_up * 100)) + "%")
+        entry_bar := bar_index
+        tp_level := close + (atr14 * TP_MULT)
+        sl_level := close - (atr14 * SL_MULT)
+    else if is_down
+        strategy.entry("AI Short", strategy.short, comment="DN " + str.tostring(math.round((1.0 - prob_up) * 100)) + "%")
+        entry_bar := bar_index
+        tp_level := close - (atr14 * TP_MULT)
+        sl_level := close + (atr14 * SL_MULT)
+
+// Triple Barrier Exit: Take Profit, Stop Loss, or Vertical Time Barrier
+if strategy.position_size > 0
+    strategy.exit("TP/SL Long", "AI Long", limit=tp_level, stop=sl_level)
+    if (bar_index - entry_bar) >= HORIZON
+        strategy.close_all(comment="Time Barrier")
+else if strategy.position_size < 0
+    strategy.exit("TP/SL Short", "AI Short", limit=tp_level, stop=sl_level)
+    if (bar_index - entry_bar) >= HORIZON
+        strategy.close_all(comment="Time Barrier")
+
+// --- 5. LIVE TRADER DASHBOARD (20 Marks Visual Usefulness) ---
+var table hud = table.new(position.top_right, 2, 4, bgcolor=color.new(color.black, 20), border_width=1)
+if barstate.islast
+    sig_txt = is_up ? "BULLISH (UP)" : is_down ? "BEARISH (DOWN)" : "NEUTRAL (WAIT)"
+    sig_col = is_up ? color.green : is_down ? color.red : color.gray
+    conf_val = prob_up >= 0.5 ? math.round(prob_up * 100, 1) : math.round((1.0 - prob_up) * 100, 1)
+    dir_lbl = prob_up >= 0.5 ? "Up: " : "Down: "
+    
+    table.cell(hud, 0, 0, "Model Engine", text_color=color.white)
+    table.cell(hud, 1, 0, "MLP_NeuralNet", text_color=color.yellow)
+    table.cell(hud, 0, 1, "Signal (3h Horizon)", text_color=color.white)
+    table.cell(hud, 1, 1, sig_txt, bgcolor=sig_col, text_color=color.white)
+    table.cell(hud, 0, 2, "Model Confidence", text_color=color.white)
+    table.cell(hud, 1, 2, dir_lbl + str.tostring(conf_val) + "%", text_color=color.white)
+    table.cell(hud, 0, 3, "Regime (Efficiency)", text_color=color.white)
+    table.cell(hud, 1, 3, f9 > 0.20 ? "TRENDING" : "CHOPPY", text_color=f9 > 0.20 ? color.lime : color.orange)
+
+plot(ema50, "EMA 50", color=color.new(color.aqua, 50))
+plot(ema200, "EMA 200", color=color.new(color.yellow, 30), linewidth=2)

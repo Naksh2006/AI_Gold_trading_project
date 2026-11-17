@@ -1,0 +1,98 @@
+//@version=5
+strategy("AI Gold Backtest (PAXG/XAU)", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.05)
+
+// --- 1. FEATURE ENGINEERING ---
+f1 = math.log(close / close[1])
+f2 = math.log(close / nz(close[4], close[1]))
+
+pine_rma(src, length) =>
+    alpha = 1.0 / length
+    sum = 0.0
+    sum := na(sum[1]) ? ta.sma(src, length) : alpha * src + (1 - alpha) * nz(sum[1])
+    sum
+
+delta = close - close[1]
+gain = delta > 0 ? delta : 0.0
+loss = delta < 0 ? -delta : 0.0
+rs = pine_rma(loss, 14) == 0 ? 0 : pine_rma(gain, 14) / pine_rma(loss, 14)
+rsi_val = 100.0 - (100.0 / (1.0 + rs))
+f3 = (rsi_val - 50.0) / 50.0
+
+macd_line = ta.ema(close, 12) - ta.ema(close, 26)
+f4 = ((macd_line - ta.ema(macd_line, 9)) / close) * 1000.0
+
+sma20 = ta.sma(close, 20)
+std20 = ta.stdev(close, 20)
+upper_band = sma20 + (std20 * 2)
+lower_band = sma20 - (std20 * 2)
+f5 = upper_band == lower_band ? 0.0 : (close - lower_band) / (upper_band - lower_band)
+
+f6 = (pine_rma(ta.tr(true), 14) / close) * 100.0
+ema50 = ta.ema(close, 50)
+f7 = (close - ema50) / ema50
+
+buy_vol = (high == low) ? 0.0 : volume * ((close - low) / (high - low))
+f8 = volume == 0 ? 0.5 : buy_vol / volume
+
+h = hour(time)
+f9 = (h >= 8 and h <= 16) ? 1.0 : 0.0
+f10 = (h >= 13 and h <= 21) ? 1.0 : 0.0
+
+// --- 2. MODEL SCALING ---
+s1 = (f1 - -1.5703083588627692e-06) / 0.0016026537493074487
+s2 = (f2 - -6.17673678097133e-06) / 0.0031886676274708917
+s3 = (f3 - 0.010739908642168328) / 0.2399640465840846
+s4 = (f4 - -0.00022256245809562048) / 0.5254173064469553
+s5 = (f5 - 0.5068490345965755) / 0.32427160384518405
+s6 = (f6 - 0.16954611096840055) / 0.1395324886091281
+s7 = (f7 - -3.6872778220137944e-05) / 0.0053227849993247745
+s8 = (f8 - 0.4841342521832217) / 0.20195975290908424
+s9 = (f9 - 0.37538248133491087) / 0.48422151340244696
+s10 = (f10 - 0.37558647138019663) / 0.48427396574291437
+
+// --- 3. NEURAL NETWORK FORWARD PASS ---
+h0_raw = 0.264780 + (s1 * 0.094280) + (s2 * -0.028819) + (s3 * -0.061500) + (s4 * -0.042470) + (s5 * -0.361538) + (s6 * -0.146079) + (s7 * 0.137872) + (s8 * -0.410792) + (s9 * -0.341311) + (s10 * -0.430981)
+h0 = math.max(0.0, h0_raw)
+h1_raw = 0.579482 + (s1 * 0.347878) + (s2 * 0.357743) + (s3 * 0.042231) + (s4 * 0.457851) + (s5 * 0.462902) + (s6 * -0.682195) + (s7 * -0.289690) + (s8 * 0.165295) + (s9 * 0.388997) + (s10 * 0.368701)
+h1 = math.max(0.0, h1_raw)
+h2_raw = 0.053543 + (s1 * 0.018794) + (s2 * -0.338864) + (s3 * -0.353169) + (s4 * -0.137929) + (s5 * 0.315728) + (s6 * -1.050734) + (s7 * 0.299192) + (s8 * -0.422944) + (s9 * -0.416646) + (s10 * 0.038238)
+h2 = math.max(0.0, h2_raw)
+h3_raw = -0.484334 + (s1 * 0.290850) + (s2 * 0.385300) + (s3 * -0.211708) + (s4 * -0.022817) + (s5 * 0.619267) + (s6 * 0.197230) + (s7 * 0.113528) + (s8 * -0.221645) + (s9 * 0.337038) + (s10 * 0.236449)
+h3 = math.max(0.0, h3_raw)
+h4_raw = -0.402899 + (s1 * -0.116753) + (s2 * 0.164691) + (s3 * 0.331572) + (s4 * -0.107323) + (s5 * 0.046727) + (s6 * -0.316966) + (s7 * 0.349095) + (s8 * -0.116108) + (s9 * -0.387001) + (s10 * 0.106697)
+h4 = math.max(0.0, h4_raw)
+h5_raw = -0.231212 + (s1 * -0.512396) + (s2 * -0.206736) + (s3 * -0.204969) + (s4 * -0.202356) + (s5 * -0.277457) + (s6 * 0.397784) + (s7 * 0.632009) + (s8 * -0.221472) + (s9 * 0.713474) + (s10 * -0.446198)
+h5 = math.max(0.0, h5_raw)
+h6_raw = 0.063351 + (s1 * -0.314311) + (s2 * -0.394002) + (s3 * -0.286763) + (s4 * -0.097080) + (s5 * 0.116216) + (s6 * 0.040642) + (s7 * 0.084556) + (s8 * -0.006850) + (s9 * 0.075211) + (s10 * 0.017196)
+h6 = math.max(0.0, h6_raw)
+h7_raw = 0.608171 + (s1 * 0.063819) + (s2 * -0.163192) + (s3 * -0.351219) + (s4 * -0.288211) + (s5 * -0.219151) + (s6 * -0.733633) + (s7 * 0.479908) + (s8 * 0.197775) + (s9 * -0.231382) + (s10 * -0.676347)
+h7 = math.max(0.0, h7_raw)
+
+// Output Layer
+out_raw = -0.204513 + (h0 * 0.481489) + (h1 * -0.258370) + (h2 * -0.750501) + (h3 * 0.251409) + (h4 * 0.315259) + (h5 * -0.079671) + (h6 * 0.240229) + (h7 * -0.251910)
+prob_up = 1.0 / (1.0 + math.exp(-out_raw))
+
+// --- 4. BACKTEST EXECUTION ---
+UP_THRESHOLD = 0.65
+DOWN_THRESHOLD = 0.70
+
+is_up = prob_up >= UP_THRESHOLD
+is_down = prob_up <= DOWN_THRESHOLD
+
+// Track how many bars we have been in a trade
+var int bars_in_trade = 0
+if strategy.position_size != 0
+    bars_in_trade += 1
+else
+    bars_in_trade := 0
+
+// Execution Logic
+if barstate.isconfirmed
+    if is_up
+        strategy.entry("Long", strategy.long)
+    if is_down
+        strategy.entry("Short", strategy.short)
+
+// Exit after our 4-candle training horizon
+if bars_in_trade >= 4
+    strategy.close_all(comment="Time Exit")

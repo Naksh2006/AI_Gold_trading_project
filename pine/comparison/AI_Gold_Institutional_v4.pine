@@ -1,0 +1,209 @@
+//@version=5
+strategy("AI Gold Institutional v4 (Macro + OrderFlow + SafeHaven)", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.005)
+
+// =========================================================================
+// 1. USER-CONFIGURABLE FILTERS (Adjust in Strategy Settings Gear Icon!)
+// =========================================================================
+conf_thresh = input.float(0.61, "Minimum AI Confidence Threshold (0.60 = 60%)", minval=0.52, maxval=0.75, step=0.01)
+min_er      = input.float(0.18, "Minimum Trend Efficiency Ratio (Blocks Chop)", minval=0.05, maxval=0.40, step=0.02)
+tp_mult     = input.float(2.0, "Take Profit (ATR Multiplier)", minval=1.0, maxval=4.0, step=0.1)
+sl_mult     = input.float(1.4, "Stop Loss (ATR Multiplier)", minval=0.8, maxval=3.0, step=0.1)
+cooldown_n  = input.int(4, "Post-Loss Cooldown Bars (Prevents Whipsaw Clustering)", minval=0, maxval=12)
+block_wknd  = input.bool(true, "Block Low-Liquidity Weekend & Rollover Hours")
+
+// =========================================================================
+// 2. CROSS-ASSET LIVE FEEDS (US Dollar Proxy & Global Liquidity)
+// =========================================================================
+eur_close = request.security("BINANCE:EURUSDT", timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
+btc_close = request.security("BINANCE:BTCUSDT", timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
+
+// =========================================================================
+// 3. 14 INSTITUTIONAL FEATURES (MICROSTRUCTURE, MTF, MACRO & SAFE-HAVEN)
+// =========================================================================
+pine_rma(src, length) =>
+    alpha = 1.0 / length
+    var float sum = na
+    sum := na(sum[1]) ? ta.sma(src, length) : alpha * src + (1.0 - alpha) * nz(sum[1])
+    sum
+
+tr_val = ta.tr(true)
+atr14 = pine_rma(tr_val, 14)
+atr_pct = (atr14 / close) + 1e-10
+
+f1 = ((close - nz(close[3], close[1])) / nz(close[3], close[1])) / atr_pct
+
+typ_p = (high + low + close) / 3.0
+vwap24 = math.sum(typ_p * volume, 24) / (math.sum(volume, 24) + 1e-10)
+f2 = ((close - vwap24) / close) / atr_pct
+
+delta = close - close[1]
+gain = delta > 0 ? delta : 0.0
+loss = delta < 0 ? -delta : 0.0
+rs14 = pine_rma(loss, 14) == 0 ? 0.0 : pine_rma(gain, 14) / pine_rma(loss, 14)
+rsi14 = 100.0 - (100.0 / (1.0 + rs14))
+f3 = (rsi14 - 50.0) / 50.0
+
+ema12 = ta.ema(close, 12)
+ema26 = ta.ema(close, 26)
+macd_line = ema12 - ema26
+macd_hist = macd_line - ta.ema(macd_line, 9)
+f4 = macd_hist / (atr14 + 1e-10)
+
+sma20 = ta.sma(close, 20)
+std20 = ta.stdev(close, 20) + 1e-10
+f5 = (close - sma20) / (2.0 * std20)
+
+ema16 = ta.ema(close, 16)
+ema64 = ta.ema(close, 64)
+ema200 = ta.ema(close, 200)
+f6 = ((ema16 - ema64) / close) / atr_pct
+f7 = ((ema64 - ema200) / close) / atr_pct
+
+// f8: Kaufman Efficiency Ratio (12) -> Chop Detector
+net_move = math.abs(close - nz(close[12], close[1]))
+sum_moves = math.sum(math.abs(close - close[1]), 12)
+f8 = sum_moves == 0 ? 0.0 : net_move / sum_moves
+
+// f9: Spread / Candle Body-to-Range Efficiency
+rng = (high - low) + 1e-10
+f9 = (close - open) / rng
+
+// f10: Order Flow / Volume-Weighted Buying/Selling Pressure
+signed_vol = ((close - low) - (high - close)) / rng * volume
+f10 = math.sum(signed_vol, 4) / (math.sum(volume, 4) + 1e-10)
+
+// f11, f12, f13: Macro USD & Geopolitical Safe-Haven Catalyst
+eur_ret4 = (eur_close - nz(eur_close[4], eur_close[1])) / nz(eur_close[4], eur_close[1])
+gold_ret4 = (close - nz(close[4], close[1])) / nz(close[4], close[1])
+btc_ret4 = (btc_close - nz(btc_close[4], btc_close[1])) / nz(btc_close[4], btc_close[1])
+
+f11 = nz(eur_ret4, 0.0) * 100.0
+f12 = nz(eur_ret4 - gold_ret4, 0.0) * 100.0
+
+vol_surge = math.min(3.0, math.max(0.5, volume / (ta.sma(volume, 20) + 1e-10)))
+safe_haven_div = nz(gold_ret4 + eur_ret4 * 0.5 - btc_ret4 * 0.2, 0.0)
+f13 = safe_haven_div * 100.0 * vol_surge
+
+// f14: Volatility Expansion Ratio (Detects News Spikes vs Dead Markets)
+atr5 = pine_rma(tr_val, 5)
+atr24 = pine_rma(tr_val, 24)
+f14 = (atr5 / (atr24 + 1e-10)) - 1.0
+
+// =========================================================================
+// 4. STANDARD SCALER & HYBRID ENSEMBLE INFERENCE
+// =========================================================================
+s1 = (f1 - -0.00353819) / 1.22499872
+s2 = (f2 - 0.10686200) / 1.70014282
+s3 = (f3 - 0.00462057) / 0.24334773
+s4 = (f4 - -0.00354022) / 0.23257065
+s5 = (f5 - -0.00233573) / 0.67098697
+s6 = (f6 - 0.09939846) / 1.86957019
+s7 = (f7 - 0.12726983) / 2.87635187
+s8 = (f8 - 0.28846787) / 0.20266426
+s9 = (f9 - 0.01025927) / 0.57403951
+s10 = (f10 - 0.01710429) / 0.35568469
+s11 = (f11 - -0.00063322) / 0.07724965
+s12 = (f12 - 0.00836813) / 0.37238340
+s13 = (f13 - -0.03803139) / 0.74586476
+s14 = (f14 - 0.03967249) / 0.27848554
+
+logit_lr = 0.02093829 + (s1 * 0.01824252) + (s2 * 0.09089595) + (s3 * -0.11107152) + (s4 * 0.00978234) + (s5 * -0.05210051) + (s6 * 0.05925867) + (s7 * 0.04492377) + (s8 * 0.00924910) + (s9 * 0.00543383) + (s10 * -0.04493969) + (s11 * 0.02809698) + (s12 * 0.09848560) + (s13 * 0.03543389) + (s14 * 0.06834534)
+p_lr = 1.0 / (1.0 + math.exp(-logit_lr))
+
+z0 = 0.29137287 + (s1 * 0.08741726) + (s2 * -0.26648673) + (s3 * 0.28420654) + (s4 * -0.22678173) + (s5 * -0.05715464) + (s6 * 0.36593337) + (s7 * -0.65406467) + (s8 * 0.23836466) + (s9 * -0.03433955) + (s10 * -0.19291093) + (s11 * -0.53078869) + (s12 * -0.11896316) + (s13 * 0.28232052) + (s14 * -0.61779545)
+h0 = (math.exp(2.0 * z0) - 1.0) / (math.exp(2.0 * z0) + 1.0)
+z1 = -0.35692811 + (s1 * 0.26363276) + (s2 * -0.22629546) + (s3 * 0.04791393) + (s4 * -0.53915226) + (s5 * -0.10576867) + (s6 * 0.30726690) + (s7 * 0.19110715) + (s8 * -0.20585380) + (s9 * 0.10803543) + (s10 * 0.15800032) + (s11 * 0.07916908) + (s12 * -0.10393887) + (s13 * 0.04041323) + (s14 * 0.16974360)
+h1 = (math.exp(2.0 * z1) - 1.0) / (math.exp(2.0 * z1) + 1.0)
+z2 = 0.40874220 + (s1 * 0.03316798) + (s2 * -0.31714711) + (s3 * -0.15516329) + (s4 * -0.21382179) + (s5 * 0.01729211) + (s6 * 0.37377021) + (s7 * 0.21876149) + (s8 * 0.02625143) + (s9 * -0.04758416) + (s10 * 0.02684735) + (s11 * -0.33617114) + (s12 * 0.24435560) + (s13 * -0.25616838) + (s14 * -0.14271871)
+h2 = (math.exp(2.0 * z2) - 1.0) / (math.exp(2.0 * z2) + 1.0)
+z3 = -0.07295193 + (s1 * 0.10588651) + (s2 * 0.16713552) + (s3 * -0.27257856) + (s4 * 0.40589686) + (s5 * 0.22010092) + (s6 * -0.29611934) + (s7 * -0.06209891) + (s8 * 0.26808563) + (s9 * 0.13877143) + (s10 * -0.18723580) + (s11 * -0.26266275) + (s12 * 0.09841206) + (s13 * -0.13066262) + (s14 * -0.48882810)
+h3 = (math.exp(2.0 * z3) - 1.0) / (math.exp(2.0 * z3) + 1.0)
+z4 = -0.59387839 + (s1 * -0.08510146) + (s2 * -0.01527954) + (s3 * -0.11280840) + (s4 * 0.15326019) + (s5 * -0.12085240) + (s6 * 0.16509599) + (s7 * 0.27945643) + (s8 * 0.28833428) + (s9 * -0.06573289) + (s10 * 0.18345639) + (s11 * 0.62392501) + (s12 * 0.19651915) + (s13 * -0.15945816) + (s14 * 0.11185422)
+h4 = (math.exp(2.0 * z4) - 1.0) / (math.exp(2.0 * z4) + 1.0)
+z5 = -0.57745523 + (s1 * -0.15021669) + (s2 * -0.26121107) + (s3 * 0.27911775) + (s4 * 0.51288645) + (s5 * -0.06846339) + (s6 * 0.03198324) + (s7 * 0.02123902) + (s8 * 0.38394884) + (s9 * 0.04057750) + (s10 * 0.17716396) + (s11 * 0.03501286) + (s12 * 0.15885524) + (s13 * 0.27855620) + (s14 * -0.53043917)
+h5 = (math.exp(2.0 * z5) - 1.0) / (math.exp(2.0 * z5) + 1.0)
+z6 = 0.08783403 + (s1 * -0.27370708) + (s2 * -0.38880253) + (s3 * -0.17237894) + (s4 * -0.33656885) + (s5 * 0.03049574) + (s6 * 0.02945608) + (s7 * -0.14617903) + (s8 * -0.13752078) + (s9 * 0.02282484) + (s10 * 0.08733419) + (s11 * 0.28069638) + (s12 * 0.08369303) + (s13 * 0.06695584) + (s14 * -0.02023023)
+h6 = (math.exp(2.0 * z6) - 1.0) / (math.exp(2.0 * z6) + 1.0)
+z7 = -0.43629496 + (s1 * 0.09656963) + (s2 * 0.15373812) + (s3 * -0.02409965) + (s4 * -0.18390808) + (s5 * 0.10893070) + (s6 * 0.07147527) + (s7 * 0.34559136) + (s8 * -0.24686882) + (s9 * -0.04761527) + (s10 * 0.12543458) + (s11 * -0.05542516) + (s12 * 0.08941563) + (s13 * 0.35186036) + (s14 * 0.29729612)
+h7 = (math.exp(2.0 * z7) - 1.0) / (math.exp(2.0 * z7) + 1.0)
+z8 = -0.49331750 + (s1 * -0.15979005) + (s2 * 0.37472123) + (s3 * -0.08677314) + (s4 * 0.22228057) + (s5 * 0.16525499) + (s6 * -0.15582504) + (s7 * -0.26412922) + (s8 * -0.30688259) + (s9 * -0.05033710) + (s10 * -0.00330816) + (s11 * -0.46262563) + (s12 * 0.17439215) + (s13 * -0.34952206) + (s14 * 0.22491127)
+h8 = (math.exp(2.0 * z8) - 1.0) / (math.exp(2.0 * z8) + 1.0)
+z9 = -0.24448463 + (s1 * -0.06373166) + (s2 * 0.38553055) + (s3 * -0.14598219) + (s4 * 0.03160628) + (s5 * -0.24358652) + (s6 * 0.30127404) + (s7 * 0.48415704) + (s8 * -0.38739232) + (s9 * 0.03522269) + (s10 * 0.29269452) + (s11 * -0.38337173) + (s12 * 0.53080057) + (s13 * -0.08711302) + (s14 * 0.55530018)
+h9 = (math.exp(2.0 * z9) - 1.0) / (math.exp(2.0 * z9) + 1.0)
+logit_mlp = -0.00629559 + (h0 * 0.71121858) + (h1 * -0.52121686) + (h2 * -0.58721394) + (h3 * 0.56438183) + (h4 * 0.59018178) + (h5 * -0.72132540) + (h6 * 0.40965314) + (h7 * 0.48448750) + (h8 * -0.52175352) + (h9 * 0.75324422)
+p_mlp = 1.0 / (1.0 + math.exp(-logit_mlp))
+
+raw_p = 0.45 * p_lr + 0.55 * p_mlp
+z_prob = (raw_p - 0.49842181) / (0.04926294)
+prob_up = 1.0 / (1.0 + math.exp(-z_prob))
+
+// =========================================================================
+// 5. REGIME-GATED EXECUTION & ANTI-WHIPSAW COOLDOWN
+// =========================================================================
+HORIZON = 8
+dn_thresh = 1.0 - conf_thresh
+
+// Liquidity & Microstructure Regime Check
+wknd_ok = not block_wknd or (dayofweek != dayofweek.saturday and dayofweek != dayofweek.sunday and hour(time) >= 1 and hour(time) <= 21)
+regime_ok = wknd_ok and (f8 >= min_er) and (f14 <= 1.5)
+
+is_up = regime_ok and (prob_up >= conf_thresh) and (f6 > -0.3)
+is_down = regime_ok and (prob_up <= dn_thresh) and (f6 < 0.3)
+
+var int entry_bar = na
+var int last_exit_bar = -999
+var float tp_level = na
+var float sl_level = na
+
+cooldown_ok = (bar_index - last_exit_bar) >= cooldown_n
+
+if barstate.isconfirmed and strategy.position_size == 0 and cooldown_ok
+    if is_up
+        strategy.entry("AI Long", strategy.long, comment="UP " + str.tostring(math.round(prob_up * 100)) + "%")
+        entry_bar := bar_index
+        tp_level := close + (atr14 * tp_mult)
+        sl_level := close - (atr14 * sl_mult)
+    else if is_down
+        strategy.entry("AI Short", strategy.short, comment="DN " + str.tostring(math.round((1.0 - prob_up) * 100)) + "%")
+        entry_bar := bar_index
+        tp_level := close - (atr14 * tp_mult)
+        sl_level := close + (atr14 * sl_mult)
+
+if strategy.position_size > 0
+    strategy.exit("Exit Long", "AI Long", limit=tp_level, stop=sl_level)
+    if (bar_index - entry_bar) >= HORIZON
+        strategy.close_all(comment="2h Horizon Exit")
+        last_exit_bar := bar_index
+else if strategy.position_size < 0
+    strategy.exit("Exit Short", "AI Short", limit=tp_level, stop=sl_level)
+    if (bar_index - entry_bar) >= HORIZON
+        strategy.close_all(comment="2h Horizon Exit")
+        last_exit_bar := bar_index
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    last_exit_bar := bar_index
+
+// =========================================================================
+// 6. VISUAL OVERLAYS & INSTITUTIONAL TRADER HUD
+// =========================================================================
+plot(vwap24, "6H Institutional VWAP", color=color.new(color.fuchsia, 30), linewidth=2)
+plot(ema64, "16H MTF Trend", color=color.new(color.yellow, 20), linewidth=2)
+
+var table hud = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 15), border_width=1)
+if barstate.islast
+    sig_txt = is_up ? "STRONG BUY (UP)" : is_down ? "STRONG SELL (DOWN)" : not regime_ok ? "FILTERED (CHOP/SPREAD)" : "NEUTRAL (WAIT)"
+    sig_col = is_up ? color.green : is_down ? color.red : color.gray
+    conf_pct = prob_up >= 0.5 ? math.round(prob_up * 100, 1) : math.round((1.0 - prob_up) * 100, 1)
+    
+    table.cell(hud, 0, 0, "AI Quant Engine", text_color=color.white)
+    table.cell(hud, 1, 0, "v4 Hybrid + OrderFlow", text_color=color.yellow)
+    table.cell(hud, 0, 1, "Live Action (2h)", text_color=color.white)
+    table.cell(hud, 1, 1, sig_txt, bgcolor=sig_col, text_color=color.white)
+    table.cell(hud, 0, 2, "Directional Conf", text_color=color.white)
+    table.cell(hud, 1, 2, str.tostring(conf_pct) + "% (Min: " + str.tostring(math.round(conf_thresh*100)) + "%)", text_color=color.white)
+    table.cell(hud, 0, 3, "Safe-Haven Flow", text_color=color.white)
+    table.cell(hud, 1, 3, f13 > 0.15 ? "SAFE-HAVEN INFLOW" : f13 < -0.15 ? "RISK-ON OUTFLOW" : "NEUTRAL", text_color=f13 > 0 ? color.lime : color.orange)
+    table.cell(hud, 0, 4, "Order Flow (VSA)", text_color=color.white)
+    table.cell(hud, 1, 4, f10 > 0.05 ? "NET BUY ABSORPTION" : f10 < -0.05 ? "NET SELL PRESSURE" : "BALANCED", text_color=f10 > 0 ? color.lime : color.red)
+    table.cell(hud, 0, 5, "Market Regime", text_color=color.white)
+    table.cell(hud, 1, 5, f8 >= min_er ? "CLEAN TREND" : "CHOP / WIDE SPREAD", text_color=f8 >= min_er ? color.lime : color.orange)

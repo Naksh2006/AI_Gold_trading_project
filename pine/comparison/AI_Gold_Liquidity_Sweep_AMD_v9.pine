@@ -1,0 +1,285 @@
+//@version=5
+strategy("AI Gold Liquidity Sweep & Fake-Breakout AMD v9 (Model 1: 50% EQ + Model 2: Full Range)", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=45, pyramiding=2, commission_type=strategy.commission.percent, commission_value=0.005, max_labels_count=500)
+
+// =========================================================================
+// 1. EVALUATION WINDOW (DEFAULT: FULL CHART SEP 1 - NOV 16!)
+// =========================================================================
+use_date_filter = input.bool(false, "Restrict to Custom Date Range (Uncheck for Full Chart)", group="1. Evaluation Window")
+start_time      = input.time(timestamp("09 Nov 2026 00:00 +0000"), "Start Date (UTC)", group="1. Evaluation Window")
+end_time        = input.time(timestamp("16 Nov 2026 23:59 +0000"), "End Date (UTC)", group="1. Evaluation Window")
+block_sunday    = input.bool(true, "Block Illiquid Sunday Session", group="1. Evaluation Window")
+
+in_date_window = (not use_date_filter or (time >= start_time and time <= end_time)) and (not block_sunday or dayofweek != dayofweek.sunday)
+bgcolor(use_date_filter and in_date_window ? color.new(color.blue, 94) : na, title="Active Window")
+
+// =========================================================================
+// 2. ICT / SMC LIQUIDITY SWEEP & MODEL 1 / MODEL 2 SETTINGS
+// =========================================================================
+range_len    = input.int(32,   "ITF Dealing Range Lookback (Bars)", minval=16, maxval=96, group="2. Top-Down Structure & Sweep")
+sweep_len    = input.int(10,   "LTF Stop-Hunt Liquidity Pool Lookback (Bars)", minval=5, maxval=30, group="2. Top-Down Structure & Sweep")
+z_min_val    = input.float(0.15, "Min AI Sweep Conviction Z-Score", minval=-0.50, maxval=1.50, step=0.05, group="2. Top-Down Structure & Sweep")
+z_strong_val = input.float(0.60, "Tier-2 High Conviction Z-Score", minval=0.0, maxval=2.00, step=0.05, group="2. Top-Down Structure & Sweep")
+sl_pad_atr   = input.float(0.45, "Invalidation Stop Buffer Beyond Sweep Wick (ATR)", minval=0.10, maxval=1.00, step=0.05, group="3. Model 1 (50% EQ) & Model 2 (Full Range)")
+min_rr_val   = input.float(2.0,  "Model 2 Full Range Minimum R:R Target", minval=1.5, maxval=4.0, step=0.1, group="3. Model 1 (50% EQ) & Model 2 (Full Range)")
+max_hold_b   = input.int(18,   "Max Holding Horizon (Bars)", minval=6, maxval=40, group="3. Model 1 (50% EQ) & Model 2 (Full Range)")
+tier1_pct    = input.float(45.0, "Tier-1 Standard Allocation (%)", minval=10.0, maxval=100.0, step=5.0, group="4. Capital & Reload Zone Pyramid")
+tier2_pct    = input.float(65.0, "Tier-2 Strong Allocation (%)", minval=20.0, maxval=100.0, step=5.0, group="4. Capital & Reload Zone Pyramid")
+enable_pyr   = input.bool(true, "Enable Model 2 Reload Zone Pyramid (+35%)", group="4. Capital & Reload Zone Pyramid")
+
+// =========================================================================
+// 3. TOP-DOWN STRUCTURE (HTF TREND, ITF RANGE EQ, LTF LIQUIDITY SWEEP & FVG)
+// =========================================================================
+eur_close = request.security("BINANCE:EURUSDT", timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
+btc_close = request.security("BINANCE:BTCUSDT", timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
+
+pine_rma(src, length) =>
+    alpha = 1.0 / length
+    var float sum = na
+    sum := na(sum[1]) ? ta.sma(src, length) : alpha * src + (1.0 - alpha) * nz(sum[1])
+    sum
+
+tr_val  = ta.tr(true)
+atr14   = pine_rma(tr_val, 14)
+atr_pct = (atr14 / close) + 1e-10
+
+// 1. HTF Trend (H4 / Daily Draw on Liquidity)
+ema64     = ta.ema(close, 64)
+ema192    = ta.ema(close, 192)
+htf_trend = ((ema64 - ema192) / close) / atr_pct
+
+// 2. ITF Dealing Range (Range High, Range Low, and 50% Equilibrium Midpoint!)
+range_h    = ta.highest(high[1], range_len)
+range_l    = ta.lowest(low[1], range_len)
+range_eq   = (range_h + range_l) / 2.0
+range_size = (range_h - range_l) + 1e-10
+pd_pos     = (close - range_l) / range_size // < 0.50 = Discount, > 0.50 = Premium
+
+// 3. LTF Liquidity Pools (Stop-Hunt Highs & Lows)
+liq_high_10 = ta.highest(high[1], sweep_len)
+liq_low_10  = ta.lowest(low[1], sweep_len)
+
+// Model 1 Manipulation Sweep Detection (Fake Breakout + Snap Back Inside Range!)
+swept_low_now   = (low < liq_low_10) and (close > liq_low_10) and (close > open)
+swept_low_prev  = (low[1] < liq_low_10[1]) and (close > liq_low_10[1]) and (close > open) and (close > close[1])
+swept_high_now  = (high > liq_high_10) and (close < liq_high_10) and (close < open)
+swept_high_prev = (high[1] > liq_high_10[1]) and (close < liq_high_10[1]) and (close < open) and (close < close[1])
+
+// Fair Value Gap (FVG) & Order Block Reload Zone (61.8% - 80% Retracement in Discount/Premium)
+bull_fvg = (low > high[2]) and (close[1] > open[1])
+bear_fvg = (high < low[2]) and (close[1] < open[1])
+recent_bull_fvg = ta.highest(bull_fvg ? 1.0 : 0.0, 6) > 0
+recent_bear_fvg = ta.highest(bear_fvg ? 1.0 : 0.0, 6) > 0
+
+bull_reload = (pd_pos <= 0.42) and (pd_pos >= 0.12) and recent_bull_fvg and (close > open) and ((close - low) > 0.5 * (high - low))
+bear_reload = (pd_pos >= 0.58) and (pd_pos <= 0.88) and recent_bear_fvg and (close < open) and ((high - close) > 0.5 * (high - low))
+
+bull_setup_raw = swept_low_now or swept_low_prev or bull_reload
+bear_setup_raw = swept_high_now or swept_high_prev or bear_reload
+
+// --- 12 AI FEATURES ---
+rng    = (high - low) + 1e-10
+l_wick = math.min(open, close) - low
+u_wick = high - math.max(open, close)
+
+f1 = (l_wick - u_wick) / rng
+f2 = (close - open) / rng
+f3 = (pd_pos - 0.50) * 2.0
+f4 = (close - ((liq_high_10 + liq_low_10) / 2.0)) / (atr14 + 1e-10)
+f5 = (close - nz(open[2], open)) / (atr14 + 1e-10)
+f6 = htf_trend
+
+vol_ma20 = ta.sma(volume, 20) + 1e-10
+f7 = math.min(4.0, math.max(0.2, volume / vol_ma20)) - 1.0
+
+delta = close - close[1]
+gain = delta > 0 ? delta : 0.0
+loss = delta < 0 ? -delta : 0.0
+rs14 = pine_rma(loss, 14) == 0 ? 0.0 : pine_rma(gain, 14) / pine_rma(loss, 14)
+rsi14 = 100.0 - (100.0 / (1.0 + rs14))
+f8 = (rsi14 - 50.0) / 50.0
+
+typ_p  = (high + low + close) / 3.0
+vwap24 = math.sum(typ_p * volume, 24) / (math.sum(volume, 24) + 1e-10)
+f9 = ((close - vwap24) / close) / atr_pct
+f10 = (range_size / (atr14 + 1e-10)) / 5.0 - 1.0
+
+eur_ret4  = (eur_close - nz(eur_close[4], eur_close[1])) / nz(eur_close[4], eur_close[1])
+gold_ret4 = (close - nz(close[4], close[1])) / nz(close[4], close[1])
+btc_ret4  = (btc_close - nz(btc_close[4], btc_close[1])) / nz(btc_close[4], btc_close[1])
+f11 = nz(eur_ret4, 0.0) * 100.0
+f12 = nz(eur_ret4 - gold_ret4 + 0.15 * btc_ret4, 0.0) * 100.0
+
+// =========================================================================
+// 4. FROZEN AI INFERENCE + ROLLING 200-BAR Z-SCORE
+// =========================================================================
+s1 = (f1 - 0.00331828) / 0.39685308
+s2 = (f2 - 0.01039810) / 0.61506073
+s3 = (f3 - 0.06877406) / 0.63902604
+s4 = (f4 - 0.09884818) / 1.38897453
+s5 = (f5 - 0.02896735) / 1.27220805
+s6 = (f6 - 0.60549584) / 4.91249613
+s7 = (f7 - 0.01673979) / 0.88798923
+s8 = (f8 - 0.02247538) / 0.23294682
+s9 = (f9 - 0.16552751) / 1.71735354
+s10 = (f10 - 0.30387041) / 0.48902765
+s11 = (f11 - 0.00066841) / 0.08862005
+s12 = (f12 - -0.00199891) / 0.25030839
+
+logit_lr = -0.00005718 + (s1 * -0.02269007) + (s2 * -0.03505046) + (s3 * -0.11466440) + (s4 * -0.13333589) + (s5 * -0.04312821) + (s6 * 0.05855305) + (s7 * -0.00597305) + (s8 * 0.06448008) + (s9 * 0.04851636) + (s10 * 0.01729116) + (s11 * 0.07838195) + (s12 * -0.05056453)
+p_lr = 1.0 / (1.0 + math.exp(-logit_lr))
+
+z_n0 = -0.27133662 + (s1 * 0.02148647) + (s2 * 0.00514700) + (s3 * -0.26310057) + (s4 * -0.34444896) + (s5 * -0.24211866) + (s6 * 0.04395921) + (s7 * -0.09636184) + (s8 * -0.12087892) + (s9 * -0.13240447) + (s10 * -0.08851133) + (s11 * 0.08077003) + (s12 * 0.21359723)
+h0 = (math.exp(2.0 * z_n0) - 1.0) / (math.exp(2.0 * z_n0) + 1.0)
+z_n1 = 0.25730753 + (s1 * 0.12928755) + (s2 * 0.14782371) + (s3 * 0.08899828) + (s4 * 0.18029486) + (s5 * 0.14796457) + (s6 * -0.12482746) + (s7 * -0.04434428) + (s8 * -0.16347608) + (s9 * -0.02293462) + (s10 * 0.11546715) + (s11 * 0.01275190) + (s12 * 0.04362375)
+h1 = (math.exp(2.0 * z_n1) - 1.0) / (math.exp(2.0 * z_n1) + 1.0)
+z_n2 = -0.03661708 + (s1 * -0.00007259) + (s2 * 0.00237143) + (s3 * 0.00349481) + (s4 * 0.00056499) + (s5 * -0.00703279) + (s6 * 0.00691087) + (s7 * 0.00063664) + (s8 * 0.00403904) + (s9 * 0.00283929) + (s10 * -0.00299457) + (s11 * -0.00585391) + (s12 * 0.01290540)
+h2 = (math.exp(2.0 * z_n2) - 1.0) / (math.exp(2.0 * z_n2) + 1.0)
+z_n3 = -0.77841274 + (s1 * 0.01082292) + (s2 * 0.08498880) + (s3 * -0.03678560) + (s4 * 0.01478180) + (s5 * 0.09117921) + (s6 * -0.03004652) + (s7 * 0.03596834) + (s8 * -0.03317746) + (s9 * 0.14572625) + (s10 * -0.01871418) + (s11 * -0.07343105) + (s12 * -0.00599781)
+h3 = (math.exp(2.0 * z_n3) - 1.0) / (math.exp(2.0 * z_n3) + 1.0)
+z_n4 = -0.21197236 + (s1 * -0.05833468) + (s2 * 0.04885358) + (s3 * 0.05545582) + (s4 * 0.06233457) + (s5 * 0.00834584) + (s6 * -0.01408494) + (s7 * 0.09941640) + (s8 * -0.06044179) + (s9 * -0.14518327) + (s10 * 0.17085596) + (s11 * -0.18251144) + (s12 * 0.30883681)
+h4 = (math.exp(2.0 * z_n4) - 1.0) / (math.exp(2.0 * z_n4) + 1.0)
+z_n5 = 0.48111366 + (s1 * -0.12236411) + (s2 * -0.06973530) + (s3 * -0.16429200) + (s4 * -0.09025681) + (s5 * -0.06501077) + (s6 * 0.15626583) + (s7 * -0.03978949) + (s8 * -0.07619235) + (s9 * 0.10230119) + (s10 * -0.19369337) + (s11 * -0.16436236) + (s12 * 0.01699494)
+h5 = (math.exp(2.0 * z_n5) - 1.0) / (math.exp(2.0 * z_n5) + 1.0)
+z_n6 = 0.09701975 + (s1 * 0.00722386) + (s2 * 0.00113833) + (s3 * 0.02298099) + (s4 * 0.03856187) + (s5 * 0.02374305) + (s6 * -0.00554375) + (s7 * 0.02205544) + (s8 * 0.02167256) + (s9 * 0.00993805) + (s10 * 0.03140652) + (s11 * 0.01940464) + (s12 * -0.00335988)
+h6 = (math.exp(2.0 * z_n6) - 1.0) / (math.exp(2.0 * z_n6) + 1.0)
+z_n7 = 0.14884265 + (s1 * 0.13787605) + (s2 * 0.03195712) + (s3 * -0.00974475) + (s4 * 0.01664814) + (s5 * -0.01162737) + (s6 * -0.28873532) + (s7 * -0.02821628) + (s8 * -0.04936315) + (s9 * -0.15420777) + (s10 * -0.29679107) + (s11 * -0.00580442) + (s12 * 0.04688987)
+h7 = (math.exp(2.0 * z_n7) - 1.0) / (math.exp(2.0 * z_n7) + 1.0)
+logit_mlp = 0.42341019 + (h0 * 0.50947753) + (h1 * -0.31286549) + (h2 * 0.00249277) + (h3 * 0.28257073) + (h4 * -0.33311685) + (h5 * -0.29905263) + (h6 * -0.05619270) + (h7 * -0.34047301)
+p_mlp = 1.0 / (1.0 + math.exp(-logit_mlp))
+
+raw_p = 0.55 * p_lr + 0.45 * p_mlp
+roll_mean = ta.sma(raw_p, 200)
+roll_std  = ta.stdev(raw_p, 200) + 1e-10
+ai_z      = (raw_p - roll_mean) / roll_std
+prob_disp = 1.0 / (1.0 + math.exp(-ai_z * 1.15))
+
+// =========================================================================
+// 5. LIQUIDITY SWEEP ENTRY & MODEL 1 (50% EQ) + MODEL 2 (FULL RANGE) EXITS
+// =========================================================================
+calc_qty(pct_eq) =>
+    math.max(0.001, (strategy.equity * (pct_eq / 100.0)) / close)
+
+// Buy Sweeps in Discount (< 52% of Range); Sell Sweeps in Premium (> 48% of Range)
+is_bull_sweep = in_date_window and bull_setup_raw and (pd_pos < 0.52) and (htf_trend > -0.8 or ai_z >= z_strong_val) and (ai_z >= z_min_val)
+is_bear_sweep = in_date_window and bear_setup_raw and (pd_pos > 0.48) and (htf_trend < 0.8 or ai_z <= -z_strong_val) and (ai_z <= -z_min_val)
+
+bull_pct = ai_z >= z_strong_val ? tier2_pct : tier1_pct
+bear_pct = ai_z <= -z_strong_val ? tier2_pct : tier1_pct
+
+var int   entry_bar  = na
+var int   last_loss  = -999
+var float entry_p    = na
+var float risk_1r    = na
+var float sl_level   = na
+var float tp1_eq     = na
+var float tp2_full   = na
+var bool  hit_tp1    = false
+var bool  scaled_in  = false
+var float active_pct = 0.0
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    if strategy.closedtrades > 0 and strategy.closedtrades.profit(strategy.closedtrades - 1) < 0
+        last_loss := bar_index
+
+cooldown_ok = (bar_index - last_loss) >= 2
+
+if barstate.isconfirmed
+    if strategy.position_size == 0 and cooldown_ok
+        if is_bull_sweep
+            sweep_low  = math.min(low, low[1])
+            raw_r      = (close - sweep_low) + sl_pad_atr * atr14
+            r_dist     = math.max(0.55 * atr14, math.min(1.50 * atr14, raw_r))
+            strategy.entry("Sweep Long", strategy.long, qty=calc_qty(bull_pct), comment="SWEEP BUY (" + str.tostring(bull_pct) + "%) " + str.tostring(math.round(prob_disp*100)) + "%")
+            entry_bar  := bar_index
+            entry_p    := close
+            risk_1r    := r_dist
+            sl_level   := close - r_dist
+            tp1_eq     := math.max(range_eq, close + 1.1 * r_dist)
+            tp2_full   := math.max(range_h, close + min_rr_val * r_dist)
+            hit_tp1    := false
+            scaled_in  := false
+            active_pct := bull_pct
+        else if is_bear_sweep
+            sweep_high = math.max(high, high[1])
+            raw_r      = (sweep_high - close) + sl_pad_atr * atr14
+            r_dist     = math.max(0.55 * atr14, math.min(1.50 * atr14, raw_r))
+            strategy.entry("Sweep Short", strategy.short, qty=calc_qty(bear_pct), comment="SWEEP SELL (" + str.tostring(bear_pct) + "%) " + str.tostring(math.round((1.0-prob_disp)*100)) + "%")
+            entry_bar  := bar_index
+            entry_p    := close
+            risk_1r    := r_dist
+            sl_level   := close + r_dist
+            tp1_eq     := math.min(range_eq, close - 1.1 * r_dist)
+            tp2_full   := math.min(range_l, close - min_rr_val * r_dist)
+            hit_tp1    := false
+            scaled_in  := false
+            active_pct := bear_pct
+
+// --- MANAGE OPEN TRADES: MODEL 1 (50% EQ PARTIAL) + MODEL 2 (FULL RANGE RUN) ---
+if strategy.position_size > 0
+    if not hit_tp1 and high >= tp1_eq
+        hit_tp1  := true
+        sl_level := math.max(sl_level, entry_p + 0.45 * risk_1r)
+
+    if barstate.isconfirmed and enable_pyr and not scaled_in and close >= (entry_p + 0.40 * risk_1r) and ai_z >= z_min_val
+        strategy.entry("Reload Long", strategy.long, qty=calc_qty(35.0), comment="+Model2 Reload (35%)")
+        scaled_in  := true
+        active_pct := active_pct + 35.0
+        sl_level   := math.max(sl_level, entry_p)
+
+    // Exit 50% at Model 1 (50% Equilibrium) and 50% at Model 2 (Full Opposing Range)
+    strategy.exit("Model1 50% EQ", from_entry="Sweep Long", qty_percent=50, limit=tp1_eq, stop=sl_level)
+    strategy.exit("Model2 Full Range", from_entry="Sweep Long", limit=tp2_full, stop=sl_level)
+    strategy.exit("Exit Reload Long", from_entry="Reload Long", limit=tp2_full, stop=sl_level)
+
+    if (bar_index - entry_bar) >= max_hold_b
+        strategy.close_all(comment="Range Time Exit")
+
+else if strategy.position_size < 0
+    if not hit_tp1 and low <= tp1_eq
+        hit_tp1  := true
+        sl_level := math.min(sl_level, entry_p - 0.45 * risk_1r)
+
+    if barstate.isconfirmed and enable_pyr and not scaled_in and close <= (entry_p - 0.40 * risk_1r) and ai_z <= -z_min_val
+        strategy.entry("Reload Short", strategy.short, qty=calc_qty(35.0), comment="+Model2 Reload (35%)")
+        scaled_in  := true
+        active_pct := active_pct + 35.0
+        sl_level   := math.min(sl_level, entry_p)
+
+    strategy.exit("Model1 50% EQ Short", from_entry="Sweep Short", qty_percent=50, limit=tp1_eq, stop=sl_level)
+    strategy.exit("Model2 Full Range Short", from_entry="Sweep Short", limit=tp2_full, stop=sl_level)
+    strategy.exit("Exit Reload Short", from_entry="Reload Short", limit=tp2_full, stop=sl_level)
+
+    if (bar_index - entry_bar) >= max_hold_b
+        strategy.close_all(comment="Range Time Exit")
+
+if use_date_filter and not in_date_window and strategy.position_size != 0
+    strategy.close_all(comment="Window End")
+
+// =========================================================================
+// 6. VISUAL RANGE HIGH, RANGE LOW, 50% EQUILIBRIUM & AMD HUD
+// =========================================================================
+p_rh = plot(range_h,  "ITF Range High (Premium Liquidity)", color=color.new(color.red, 35), linewidth=1)
+p_eq = plot(range_eq, "50% Range Equilibrium (Model 1 Target)", color=color.new(color.yellow, 20), style=plot.style_circles, linewidth=2)
+p_rl = plot(range_l,  "ITF Range Low (Discount Liquidity)", color=color.new(color.lime, 35), linewidth=1)
+fill(p_rh, p_eq, color=color.new(color.red, 94), title="Premium Zone (Sell Sweeps)")
+fill(p_eq, p_rl, color=color.new(color.green, 94), title="Discount Zone (Buy Sweeps)")
+
+var table hud = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 15), border_width=1)
+if barstate.islast
+    conf_pct = prob_disp >= 0.5 ? math.round(prob_disp * 100, 1) : math.round((1.0 - prob_disp) * 100, 1)
+    zone_txt = pd_pos < 0.50 ? "DISCOUNT (" + str.tostring(math.round(pd_pos*100)) + "%)" : "PREMIUM (" + str.tostring(math.round(pd_pos*100)) + "%)"
+    sig_txt  = is_bull_sweep ? "SWEEP BUY (MODEL 1&2)" : is_bear_sweep ? "SWEEP SELL (MODEL 1&2)" : "WAITING FOR SWEEP"
+    sig_col  = is_bull_sweep ? color.green : is_bear_sweep ? color.red : color.gray
+
+    table.cell(hud, 0, 0, "Strategy Logic", text_color=color.white)
+    table.cell(hud, 1, 0, "ICT Liquidity Sweep + AI", text_color=color.yellow)
+    table.cell(hud, 0, 1, "HTF Draw on Liq", text_color=color.white)
+    table.cell(hud, 1, 1, htf_trend > 0 ? "BULLISH DRAW" : "BEARISH DRAW", text_color=htf_trend > 0 ? color.lime : color.red)
+    table.cell(hud, 0, 2, "ITF Range Zone", text_color=color.white)
+    table.cell(hud, 1, 2, zone_txt, text_color=pd_pos < 0.50 ? color.lime : color.orange)
+    table.cell(hud, 0, 3, "FVG / Displacement", text_color=color.white)
+    table.cell(hud, 1, 3, recent_bull_fvg ? "BULL FVG ACTIVE" : recent_bear_fvg ? "BEAR FVG ACTIVE" : "NO GAP", text_color=color.aqua)
+    table.cell(hud, 0, 4, "AI Sweep Score", text_color=color.white)
+    table.cell(hud, 1, 4, str.tostring(conf_pct) + "% Conviction", text_color=color.white)
+    table.cell(hud, 0, 5, "Live Action", text_color=color.white)
+    table.cell(hud, 1, 5, sig_txt, bgcolor=sig_col, text_color=color.white)

@@ -1,0 +1,96 @@
+//@version=5
+strategy("AI Gold Predictor v2 (PAXG/XAU)", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.02)
+
+// --- 1. EXACT 1-TO-1 FEATURE ENGINEERING ---
+f1 = math.log(close / close[1])
+f2 = math.log(close / nz(close[4], close[1]))
+f3 = math.log(close / nz(close[16], close[1]))
+
+pine_rma(src, length) =>
+    alpha = 1.0 / length
+    var float sum = na
+    sum := na(sum[1]) ? ta.sma(src, length) : alpha * src + (1.0 - alpha) * nz(sum[1])
+    sum
+
+delta = close - close[1]
+gain = delta > 0 ? delta : 0.0
+loss = delta < 0 ? -delta : 0.0
+avg_gain = pine_rma(gain, 14)
+avg_loss = pine_rma(loss, 14)
+rs = avg_loss == 0 ? 0.0 : avg_gain / avg_loss
+rsi_val = 100.0 - (100.0 / (1.0 + rs))
+f4 = (rsi_val - 50.0) / 50.0
+
+ema12 = ta.ema(close, 12)
+ema26 = ta.ema(close, 26)
+macd_line = ema12 - ema26
+signal_line = ta.ema(macd_line, 9)
+f5 = ((macd_line - signal_line) / close) * 1000.0
+
+sma20 = ta.sma(close, 20)
+std20 = ta.stdev(close, 20)
+upper_band = sma20 + (std20 * 2.0)
+lower_band = sma20 - (std20 * 2.0)
+f6 = upper_band == lower_band ? 0.5 : (close - lower_band) / (upper_band - lower_band)
+
+f7 = (pine_rma(ta.tr(true), 14) / close) * 100.0
+
+ema50 = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+f8 = ((close - ema50) / ema50) * 100.0
+f9 = ((ema50 - ema200) / ema200) * 100.0
+
+hl_range = high - low
+f10 = hl_range == 0 ? 0.5 : (close - low) / hl_range
+
+// --- 2. MODEL SCALING ---
+s1 = (f1 - -0.00000560) / 0.00194907
+s2 = (f2 - -0.00004449) / 0.00387114
+s3 = (f3 - -0.00014732) / 0.00744727
+s4 = (f4 - 0.00812760) / 0.24994577
+s5 = (f5 - 0.00071365) / 0.62835667
+s6 = (f6 - 0.50473575) / 0.34548313
+s7 = (f7 - 0.21267307) / 0.15292840
+s8 = (f8 - -0.02120312) / 0.64041434
+s9 = (f9 - -0.04649309) / 0.83348219
+s10 = (f10 - 0.51204569) / 0.33583204
+
+// --- 3. NEURAL NETWORK FORWARD PASS ---
+h0 = math.max(0.0, 0.19151299 + (s1 * 0.04805288) + (s2 * -0.14412562) + (s3 * 0.23487754) + (s4 * -0.45399554) + (s5 * 0.29007412) + (s6 * -0.28244305) + (s7 * 0.02083542) + (s8 * -0.26656380) + (s9 * -0.20414455) + (s10 * -0.03025655))
+h1 = math.max(0.0, 0.05164176 + (s1 * 0.03260766) + (s2 * -0.10750500) + (s3 * 0.10760457) + (s4 * -0.20136672) + (s5 * 0.29321989) + (s6 * -0.00393343) + (s7 * -0.59232696) + (s8 * 0.26829114) + (s9 * -0.34205393) + (s10 * -0.01183189))
+h2 = math.max(0.0, -0.32121815 + (s1 * 0.02904867) + (s2 * -0.05628399) + (s3 * 0.07516391) + (s4 * 0.07909361) + (s5 * 0.20965595) + (s6 * -0.46399517) + (s7 * 0.39030024) + (s8 * -0.12453217) + (s9 * -0.59340014) + (s10 * -0.04327960))
+h3 = math.max(0.0, -0.50389742 + (s1 * -0.01593245) + (s2 * 0.01014189) + (s3 * -0.20079753) + (s4 * 0.52900361) + (s5 * -0.13565645) + (s6 * 0.32339100) + (s7 * -0.14693445) + (s8 * -0.46245256) + (s9 * 0.02131760) + (s10 * -0.12697183))
+h4 = math.max(0.0, 0.18267371 + (s1 * -0.11082807) + (s2 * -0.09921549) + (s3 * 0.13932123) + (s4 * 0.07681833) + (s5 * -0.04567590) + (s6 * 0.16504785) + (s7 * 0.71497740) + (s8 * -0.08798860) + (s9 * -0.22472454) + (s10 * 0.02875265))
+h5 = math.max(0.0, -0.24551178 + (s1 * -0.12635912) + (s2 * -0.09529448) + (s3 * 0.10282944) + (s4 * 0.09886902) + (s5 * 0.18853982) + (s6 * 0.03209113) + (s7 * 0.42033224) + (s8 * -0.11711787) + (s9 * 0.51836313) + (s10 * 0.09934273))
+h6 = math.max(0.0, -0.01197672 + (s1 * -0.02929411) + (s2 * -0.04355701) + (s3 * -0.15709352) + (s4 * 0.32348136) + (s5 * 0.17591200) + (s6 * -0.24802437) + (s7 * -0.01726783) + (s8 * -0.15076863) + (s9 * 0.66178409) + (s10 * 0.01646345))
+h7 = math.max(0.0, 0.14031432 + (s1 * 0.04873946) + (s2 * 0.08576044) + (s3 * -0.35241986) + (s4 * 0.08686918) + (s5 * -0.26442346) + (s6 * -0.19909363) + (s7 * 0.33297834) + (s8 * -0.07180122) + (s9 * 0.08242081) + (s10 * -0.03063437))
+out_raw = -0.07931765 + (h0 * 0.49886506) + (h1 * -0.55989540) + (h2 * -0.53349001) + (h3 * 0.85929825) + (h4 * 0.49376656) + (h5 * -0.61199687) + (h6 * 0.63309017) + (h7 * -0.26657957)
+prob_up = 1.0 / (1.0 + math.exp(-out_raw))
+
+// --- 4. NON-OVERLAPPING TRADE EXECUTION & VISUALS ---
+UP_THRESHOLD = 0.62
+DOWN_THRESHOLD = 0.38
+HORIZON = 8
+
+// Regime alignment filter: trade with macro momentum
+is_up = prob_up >= UP_THRESHOLD and f9 > 0
+is_down = prob_up <= DOWN_THRESHOLD and f9 < 0
+
+var int entry_bar = na
+
+// Only enter if flat (prevents constant flipping and commission bleed!)
+if barstate.isconfirmed and strategy.position_size == 0
+    if is_up
+        strategy.entry("AI Long", strategy.long, comment="UP " + str.tostring(math.round(prob_up * 100)) + "%")
+        entry_bar := bar_index
+    else if is_down
+        strategy.entry("AI Short", strategy.short, comment="DN " + str.tostring(math.round((1.0 - prob_up) * 100)) + "%")
+        entry_bar := bar_index
+
+// Strict Horizon Exit after exactly 8 bars (2 hours)
+if strategy.position_size != 0 and (bar_index - entry_bar) >= HORIZON
+    strategy.close_all(comment="Horizon Exit")
+    entry_bar := na
+
+// Plot EMA 200 Regime Line
+plot(ema200, "EMA 200 Trend Filter", color=color.new(color.yellow, 40), linewidth=2)

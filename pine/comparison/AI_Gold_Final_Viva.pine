@@ -1,0 +1,216 @@
+//@version=5
+strategy("AI Gold Final Viva Engine (Trained <= Nov 8)", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.005)
+
+// =========================================================================
+// 1. VIVA DATE-RANGE PICKER (Test Any Single Day or Full Week!)
+// =========================================================================
+use_date_filter = input.bool(true, "Enable Custom Date Range Filter", group="1. Viva Evaluation Window")
+start_time      = input.time(timestamp("09 Nov 2026 00:00 +0000"), "Test Start Date (UTC)", group="1. Viva Evaluation Window")
+end_time        = input.time(timestamp("16 Nov 2026 23:59 +0000"), "Test End Date (UTC)", group="1. Viva Evaluation Window")
+
+in_date_window = not use_date_filter or (time >= start_time and time <= end_time)
+bgcolor(use_date_filter and in_date_window ? color.new(color.blue, 94) : na, title="Active Test Window Highlight")
+
+// =========================================================================
+// 2. STRATEGY & RISK PARAMETERS (Works on 5m, 15m, and 30m!)
+// =========================================================================
+conf_thresh   = input.float(0.54, "AI Confidence Threshold (0.54 = 54%)", minval=0.50, maxval=0.75, step=0.01, group="2. AI & Risk Settings")
+use_st_filter = input.bool(true, "Combine AI with SuperTrend Base Indicator", group="2. AI & Risk Settings")
+st_factor     = input.float(2.5, "SuperTrend ATR Factor", minval=1.0, maxval=5.0, step=0.1, group="2. AI & Risk Settings")
+max_vwap_ext  = input.float(1.8, "Anti-Chasing Max VWAP Extension (ATR)", minval=0.8, maxval=4.0, step=0.1, group="2. AI & Risk Settings")
+tp_mult       = input.float(1.8, "Take Profit (ATR Multiplier)", minval=0.8, maxval=4.0, step=0.1, group="2. AI & Risk Settings")
+sl_mult       = input.float(1.4, "Initial Stop Loss (ATR Multiplier)", minval=0.6, maxval=3.0, step=0.1, group="2. AI & Risk Settings")
+be_trigger_m  = input.float(0.85, "Breakeven Ratchet Trigger (ATR)", minval=0.3, maxval=2.5, step=0.05, group="2. AI & Risk Settings")
+horizon_bars  = input.int(8, "Max Holding Horizon (Bars)", minval=3, maxval=24, group="2. AI & Risk Settings")
+
+// =========================================================================
+// 3. CROSS-ASSET FEEDS & 12 EXACT AI FEATURES
+// =========================================================================
+eur_close = request.security("BINANCE:EURUSDT", timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
+btc_close = request.security("BINANCE:BTCUSDT", timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
+
+pine_rma(src, length) =>
+    alpha = 1.0 / length
+    var float sum = na
+    sum := na(sum[1]) ? ta.sma(src, length) : alpha * src + (1.0 - alpha) * nz(sum[1])
+    sum
+
+tr_val = ta.tr(true)
+atr14 = pine_rma(tr_val, 14)
+atr_pct = (atr14 / close) + 1e-10
+
+f1 = ((close - nz(close[2], close[1])) / nz(close[2], close[1])) / atr_pct
+f2 = ((close - nz(close[6], close[1])) / nz(close[6], close[1])) / atr_pct
+
+typ_p = (high + low + close) / 3.0
+vwap20 = math.sum(typ_p * volume, 20) / (math.sum(volume, 20) + 1e-10)
+f3 = ((close - vwap20) / close) / atr_pct
+
+delta = close - close[1]
+gain = delta > 0 ? delta : 0.0
+loss = delta < 0 ? -delta : 0.0
+rs14 = pine_rma(loss, 14) == 0 ? 0.0 : pine_rma(gain, 14) / pine_rma(loss, 14)
+rsi14 = 100.0 - (100.0 / (1.0 + rs14))
+f4 = (rsi14 - 50.0) / 50.0
+
+ema12 = ta.ema(close, 12)
+ema26 = ta.ema(close, 26)
+macd_line = ema12 - ema26
+macd_hist = macd_line - ta.ema(macd_line, 9)
+f5 = macd_hist / (atr14 + 1e-10)
+
+sma20 = ta.sma(close, 20)
+std20 = ta.stdev(close, 20) + 1e-10
+f6 = (close - sma20) / (2.0 * std20)
+
+ema21 = ta.ema(close, 21)
+ema55 = ta.ema(close, 55)
+ema144 = ta.ema(close, 144)
+f7 = ((close - ema21) / close) / atr_pct
+f8 = ((ema21 - ema55) / close) / atr_pct
+f9 = ((ema55 - ema144) / close) / atr_pct
+
+rng = (high - low) + 1e-10
+signed_vol = ((close - low) - (high - close)) / rng * volume
+f10 = math.sum(signed_vol, 4) / (math.sum(volume, 4) + 1e-10)
+
+eur_ret4 = (eur_close - nz(eur_close[4], eur_close[1])) / nz(eur_close[4], eur_close[1])
+gold_ret4 = (close - nz(close[4], close[1])) / nz(close[4], close[1])
+btc_ret4 = (btc_close - nz(btc_close[4], btc_close[1])) / nz(btc_close[4], btc_close[1])
+
+f11 = nz(eur_ret4, 0.0) * 100.0
+f12 = nz(eur_ret4 - gold_ret4 + 0.15 * btc_ret4, 0.0) * 100.0
+
+net_move = math.abs(close - nz(close[10], close[1]))
+sum_moves = math.sum(math.abs(close - close[1]), 10)
+er10 = sum_moves == 0 ? 0.0 : net_move / sum_moves
+
+// Base Indicator: Adaptive SuperTrend (10, st_factor)
+[st_val, st_dir] = ta.supertrend(st_factor, 10)
+st_bull = st_dir < 0
+st_bear = st_dir > 0
+
+// =========================================================================
+// 4. FROZEN AI WEIGHTS (STRICTLY TRAINED ON DATA <= NOV 8, 2026)
+// =========================================================================
+s1 = (f1 - 0.01654852) / 1.01848845
+s2 = (f2 - 0.05557538) / 1.66575148
+s3 = (f3 - 0.10690725) / 1.50642535
+s4 = (f4 - 0.01787682) / 0.23432790
+s5 = (f5 - -0.00001264) / 0.22169299
+s6 = (f6 - 0.03065015) / 0.66938908
+s7 = (f7 - 0.09385328) / 1.44813159
+s8 = (f8 - 0.15567154) / 1.31008402
+s9 = (f9 - 0.30879465) / 2.60869396
+s10 = (f10 - 0.00705065) / 0.38150559
+s11 = (f11 - 0.00007535) / 0.09947824
+s12 = (f12 - -0.00271942) / 0.26312442
+
+logit_lr = 0.03858579 + (s1 * -0.01819297) + (s2 * -0.06966467) + (s3 * -0.11265797) + (s4 * -0.07844225) + (s5 * 0.11261858) + (s6 * -0.17849045) + (s7 * 0.20119227) + (s8 * 0.04863812) + (s9 * 0.03748148) + (s10 * -0.04497543) + (s11 * 0.05104365) + (s12 * -0.04839548)
+p_lr = 1.0 / (1.0 + math.exp(-logit_lr))
+
+z0 = 0.30663333 + (s1 * 0.02496788) + (s2 * -0.21171668) + (s3 * -0.07280610) + (s4 * 0.00159310) + (s5 * -0.34256668) + (s6 * 0.25356741) + (s7 * -0.25529457) + (s8 * -0.05345578) + (s9 * 0.36688192) + (s10 * 0.09456996) + (s11 * -0.30548437) + (s12 * -0.19945697)
+h0 = (math.exp(2.0 * z0) - 1.0) / (math.exp(2.0 * z0) + 1.0)
+z1 = 0.13070978 + (s1 * 0.36603165) + (s2 * 0.33861784) + (s3 * 0.06917013) + (s4 * 0.09163373) + (s5 * -0.09185067) + (s6 * 0.42667747) + (s7 * 0.04996279) + (s8 * -0.00693010) + (s9 * -0.02043990) + (s10 * -0.00275069) + (s11 * 0.24449279) + (s12 * -0.22512671)
+h1 = (math.exp(2.0 * z1) - 1.0) / (math.exp(2.0 * z1) + 1.0)
+z2 = 0.07967390 + (s1 * 0.17453618) + (s2 * 0.15442990) + (s3 * -0.08852137) + (s4 * -0.06565789) + (s5 * -0.27126908) + (s6 * 0.29704183) + (s7 * 0.22240298) + (s8 * -0.40682924) + (s9 * -0.38122603) + (s10 * 0.11095618) + (s11 * 0.03034571) + (s12 * 0.34068552)
+h2 = (math.exp(2.0 * z2) - 1.0) / (math.exp(2.0 * z2) + 1.0)
+z3 = -0.29629921 + (s1 * -0.02116063) + (s2 * -0.13149119) + (s3 * -0.00713783) + (s4 * 0.07930923) + (s5 * 0.08285794) + (s6 * 0.06393109) + (s7 * -0.10047816) + (s8 * -0.03469394) + (s9 * -0.16557695) + (s10 * -0.03842182) + (s11 * 0.00756770) + (s12 * 0.16533164)
+h3 = (math.exp(2.0 * z3) - 1.0) / (math.exp(2.0 * z3) + 1.0)
+z4 = -0.51191294 + (s1 * -0.12765245) + (s2 * -0.30016742) + (s3 * -0.02099357) + (s4 * 0.21883560) + (s5 * -0.08652490) + (s6 * 0.21027012) + (s7 * -0.21448750) + (s8 * 0.05521873) + (s9 * -0.09133233) + (s10 * 0.15484269) + (s11 * 0.35922234) + (s12 * 0.14133818)
+h4 = (math.exp(2.0 * z4) - 1.0) / (math.exp(2.0 * z4) + 1.0)
+z5 = -0.24148886 + (s1 * -0.19207204) + (s2 * -0.26969095) + (s3 * 0.20799200) + (s4 * 0.13230444) + (s5 * 0.06682318) + (s6 * 0.17240142) + (s7 * -0.04645172) + (s8 * -0.06094571) + (s9 * -0.19735037) + (s10 * 0.01802766) + (s11 * -0.02797253) + (s12 * 0.42422116)
+h5 = (math.exp(2.0 * z5) - 1.0) / (math.exp(2.0 * z5) + 1.0)
+z6 = 0.67982770 + (s1 * 0.00300921) + (s2 * -0.04028173) + (s3 * -0.08815372) + (s4 * -0.03489379) + (s5 * -0.10542921) + (s6 * -0.08587535) + (s7 * -0.06594644) + (s8 * -0.03542490) + (s9 * -0.06625402) + (s10 * -0.15375278) + (s11 * 0.10657241) + (s12 * -0.00086226)
+h6 = (math.exp(2.0 * z6) - 1.0) / (math.exp(2.0 * z6) + 1.0)
+z7 = 0.49337570 + (s1 * 0.15706246) + (s2 * 0.19887498) + (s3 * 0.14047356) + (s4 * -0.04370464) + (s5 * 0.27300375) + (s6 * -0.02920868) + (s7 * 0.26476950) + (s8 * -0.03405049) + (s9 * 0.26197877) + (s10 * 0.03160394) + (s11 * 0.14250723) + (s12 * -0.20351784)
+h7 = (math.exp(2.0 * z7) - 1.0) / (math.exp(2.0 * z7) + 1.0)
+z8 = -0.07241402 + (s1 * 0.00474728) + (s2 * 0.01132611) + (s3 * 0.01363070) + (s4 * 0.00550479) + (s5 * 0.01324242) + (s6 * 0.00737903) + (s7 * 0.00707842) + (s8 * 0.00346555) + (s9 * 0.00910907) + (s10 * 0.00191055) + (s11 * -0.01727144) + (s12 * -0.00006442)
+h8 = (math.exp(2.0 * z8) - 1.0) / (math.exp(2.0 * z8) + 1.0)
+z9 = -0.27574351 + (s1 * 0.21798265) + (s2 * 0.01429039) + (s3 * -0.22540332) + (s4 * -0.13289155) + (s5 * -0.08631946) + (s6 * -0.03043435) + (s7 * 0.42691872) + (s8 * -0.35050498) + (s9 * -0.10508557) + (s10 * -0.20561925) + (s11 * -0.17121267) + (s12 * 0.04673711)
+h9 = (math.exp(2.0 * z9) - 1.0) / (math.exp(2.0 * z9) + 1.0)
+logit_mlp = 0.38283257 + (h0 * -0.29708694) + (h1 * -0.38112386) + (h2 * -0.33451032) + (h3 * -0.08956422) + (h4 * 0.48995152) + (h5 * -0.27052682) + (h6 * -0.15655717) + (h7 * 0.22570782) + (h8 * 0.00163150) + (h9 * 0.40227931)
+p_mlp = 1.0 / (1.0 + math.exp(-logit_mlp))
+
+raw_p = 0.50 * p_lr + 0.50 * p_mlp
+z_prob = (raw_p - 0.50942007) / (0.03184203)
+prob_up = 1.0 / (1.0 + math.exp(-z_prob))
+
+// =========================================================================
+// 5. ANTI-CHASING ENTRY & BREAKEVEN TRAILING STOP ENGINE
+// =========================================================================
+dn_thresh = 1.0 - conf_thresh
+
+// Combine AI Probability + Base SuperTrend/EMA Structure + Anti-Chasing VWAP Cap
+bull_structure = use_st_filter ? (st_bull or f8 > 0) : (f8 > -0.6)
+bear_structure = use_st_filter ? (st_bear or f8 < 0) : (f8 < 0.6)
+
+is_up = in_date_window and (er10 >= 0.12) and (prob_up >= conf_thresh) and bull_structure and (f3 < max_vwap_ext)
+is_down = in_date_window and (er10 >= 0.12) and (prob_up <= dn_thresh) and bear_structure and (f3 > -max_vwap_ext)
+
+var int entry_bar = na
+var float entry_p = na
+var float tp_level = na
+var float sl_level = na
+var float be_level = na
+
+if barstate.isconfirmed and strategy.position_size == 0
+    if is_up
+        strategy.entry("AI Long", strategy.long, comment="UP " + str.tostring(math.round(prob_up * 100)) + "%")
+        entry_bar := bar_index
+        entry_p := close
+        tp_level := close + (atr14 * tp_mult)
+        sl_level := close - (atr14 * sl_mult)
+        be_level := close + (atr14 * be_trigger_m)
+    else if is_down
+        strategy.entry("AI Short", strategy.short, comment="DN " + str.tostring(math.round((1.0 - prob_up) * 100)) + "%")
+        entry_bar := bar_index
+        entry_p := close
+        tp_level := close - (atr14 * tp_mult)
+        sl_level := close + (atr14 * sl_mult)
+        be_level := close - (atr14 * be_trigger_m)
+
+// Dynamic Breakeven Ratchet (Moves Stop-Loss to Entry once trade reaches +0.85 ATR)
+if strategy.position_size > 0
+    if high >= be_level
+        sl_level := math.max(sl_level, entry_p * 1.0003)
+    strategy.exit("Exit Long", "AI Long", limit=tp_level, stop=sl_level)
+    if (bar_index - entry_bar) >= horizon_bars
+        strategy.close_all(comment="Horizon Exit")
+else if strategy.position_size < 0
+    if low <= be_level
+        sl_level := math.min(sl_level, entry_p * 0.9997)
+    strategy.exit("Exit Short", "AI Short", limit=tp_level, stop=sl_level)
+    if (bar_index - entry_bar) >= horizon_bars
+        strategy.close_all(comment="Horizon Exit")
+
+// Close any open position at the end of the custom test window
+if use_date_filter and not in_date_window and strategy.position_size != 0
+    strategy.close_all(comment="End of Test Window")
+
+// =========================================================================
+// 6. CHART OVERLAYS & VIVA HUD TABLE
+// =========================================================================
+plot(vwap20, "Intraday VWAP", color=color.new(color.fuchsia, 25), linewidth=2)
+plot(st_dir < 0 ? st_val : na, "SuperTrend Bull", color=color.new(color.lime, 30), style=plot.style_linebr, linewidth=2)
+plot(st_dir > 0 ? st_val : na, "SuperTrend Bear", color=color.new(color.red, 30), style=plot.style_linebr, linewidth=2)
+
+var table hud = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 15), border_width=1)
+if barstate.islast
+    sig_txt = is_up ? "BUY / LONG" : is_down ? "SELL / SHORT" : "WAIT / HOLD"
+    sig_col = is_up ? color.green : is_down ? color.red : color.gray
+    conf_pct = prob_up >= 0.5 ? math.round(prob_up * 100, 1) : math.round((1.0 - prob_up) * 100, 1)
+    dir_txt = prob_up >= 0.5 ? "Bullish (" + str.tostring(conf_pct) + "%)" : "Bearish (" + str.tostring(conf_pct) + "%)"
+
+    table.cell(hud, 0, 0, "Train Cutoff", text_color=color.white)
+    table.cell(hud, 1, 0, "<= 08 Nov 2026 (Strict OOS)", text_color=color.yellow)
+    table.cell(hud, 0, 1, "AI Forecast", text_color=color.white)
+    table.cell(hud, 1, 1, dir_txt, text_color=prob_up >= 0.5 ? color.lime : color.orange)
+    table.cell(hud, 0, 2, "Live Signal", text_color=color.white)
+    table.cell(hud, 1, 2, sig_txt, bgcolor=sig_col, text_color=color.white)
+    table.cell(hud, 0, 3, "Base Structure", text_color=color.white)
+    table.cell(hud, 1, 3, st_bull ? "SUPERTREND BULL" : "SUPERTREND BEAR", text_color=st_bull ? color.lime : color.red)
+    table.cell(hud, 0, 4, "VWAP Stretch", text_color=color.white)
+    table.cell(hud, 1, 4, str.tostring(math.round(f3, 2)) + " ATR", text_color=math.abs(f3) < max_vwap_ext ? color.lime : color.orange)
+    table.cell(hud, 0, 5, "Risk Protection", text_color=color.white)
+    table.cell(hud, 1, 5, "Breakeven @ +" + str.tostring(be_trigger_m) + " ATR", text_color=color.aqua)

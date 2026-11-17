@@ -1,0 +1,291 @@
+//@version=5
+strategy("AI Gold Continual Mistake-Learner v11 (4Yr Pre-Trained + Daily Online OGD)", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=35, pyramiding=2, commission_type=strategy.commission.percent, commission_value=0.005)
+
+// =========================================================================
+// 1. VIVA EVALUATION WINDOW PICKER (UNCHECK FOR FULL SEP-NOV CHART!)
+// =========================================================================
+use_date_filter = input.bool(false, "Restrict to Specific Date Window (Uncheck for Full Chart)", group="1. Evaluation Window")
+start_time      = input.time(timestamp("09 Nov 2026 00:00 +0000"), "Start Date (UTC)", group="1. Evaluation Window")
+end_time        = input.time(timestamp("16 Nov 2026 23:59 +0000"), "End Date (UTC)", group="1. Evaluation Window")
+block_sunday    = input.bool(true, "Block Illiquid Sunday Session", group="1. Evaluation Window")
+
+in_date_window = (not use_date_filter or (time >= start_time and time <= end_time)) and (not block_sunday or dayofweek != dayofweek.sunday)
+bgcolor(use_date_filter and in_date_window ? color.new(color.blue, 94) : na, title="Active Window")
+
+// =========================================================================
+// 2. CONTINUAL LEARNING & RISK SETTINGS
+// =========================================================================
+enable_online = input.bool(true, "Enable End-of-Day Online Mistake Learning (Prequential OGD)", group="2. Continual Mistake Learner")
+online_eta    = input.float(0.08, "End-of-Day Online Adaptation Rate (Eta)", minval=0.01, maxval=0.25, step=0.01, group="2. Continual Mistake Learner")
+z_thresh      = input.float(0.20, "AI Conviction Z-Score Threshold", minval=0.05, maxval=1.50, step=0.05, group="2. Continual Mistake Learner")
+z_strong      = input.float(0.60, "Tier-2 High Conviction Z-Score", minval=0.25, maxval=2.00, step=0.05, group="2. Continual Mistake Learner")
+er_min_val    = input.float(0.15, "Min Kaufman Efficiency Ratio (Chop Filter)", minval=0.05, maxval=0.35, step=0.01, group="3. Regime & Risk Settings")
+tp_mult       = input.float(2.0, "Take Profit (ATR Multiplier)", minval=1.0, maxval=4.0, step=0.1, group="3. Regime & Risk Settings")
+sl_mult       = input.float(1.4, "Initial Stop Loss (ATR Multiplier)", minval=0.8, maxval=3.0, step=0.1, group="3. Regime & Risk Settings")
+horizon_bars  = input.int(10, "Max Holding Horizon (Bars)", minval=4, maxval=24, group="3. Regime & Risk Settings")
+enable_pyr    = input.bool(true, "Enable +35% Trend Pyramiding on Winners", group="3. Regime & Risk Settings")
+
+// =========================================================================
+// 3. CROSS-ASSET FEEDS & 10 STATIONARY FEATURES
+// =========================================================================
+eur_close = request.security("BINANCE:EURUSDT", timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
+btc_close = request.security("BINANCE:BTCUSDT", timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
+
+pine_rma(src, length) =>
+    alpha = 1.0 / length
+    var float sum = na
+    sum := na(sum[1]) ? ta.sma(src, length) : alpha * src + (1.0 - alpha) * nz(sum[1])
+    sum
+
+tr_val    = ta.tr(true)
+atr14     = pine_rma(tr_val, 14)
+atr_5d    = ta.sma(atr14, 480) + 1e-10
+atr_ratio = atr14 / atr_5d
+atr_pct   = (atr14 / close) + 1e-10
+
+bar_shock   = (high - low) / (atr14 + 1e-10)
+jump_shock  = math.abs(close - nz(close[2], close[1])) / (atr14 + 1e-10)
+shock_ratio = math.max(bar_shock, math.max(nz(bar_shock[1], 0.0), jump_shock / 1.4))
+
+ema20  = ta.ema(close, 20)
+ema50  = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+
+typ_p  = (high + low + close) / 3.0
+vwap32 = math.sum(typ_p * volume, 32) / (math.sum(volume, 32) + 1e-10)
+
+f1 = ((close - nz(close[2], close[1])) / nz(close[2], close[1])) / atr_pct
+f2 = ((close - nz(close[4], close[1])) / nz(close[4], close[1])) / atr_pct
+f3 = ((close - nz(close[12], close[1])) / nz(close[12], close[1])) / atr_pct
+f4 = ((close - vwap32) / close) / atr_pct
+
+delta = close - close[1]
+gain  = delta > 0 ? delta : 0.0
+loss  = delta < 0 ? -delta : 0.0
+rs14  = pine_rma(loss, 14) == 0 ? 0.0 : pine_rma(gain, 14) / pine_rma(loss, 14)
+rsi14 = 100.0 - (100.0 / (1.0 + rs14))
+f5    = (rsi14 - 50.0) / 50.0
+
+ema12     = ta.ema(close, 12)
+ema26     = ta.ema(close, 26)
+macd_line = ema12 - ema26
+macd_hist = macd_line - ta.ema(macd_line, 9)
+f6        = macd_hist / (atr14 + 1e-10)
+
+f7 = ((ema20 - ema50) / close) / atr_pct
+f8 = ((ema50 - ema200) / close) / atr_pct
+
+rng        = (high - low) + 1e-10
+signed_vol = ((close - open) / rng) * volume
+f9         = math.sum(signed_vol, 4) / (math.sum(volume, 4) + 1e-10)
+
+eur_ret4  = (eur_close - nz(eur_close[4], eur_close[1])) / nz(eur_close[4], eur_close[1])
+gold_ret4 = (close - nz(close[4], close[1])) / nz(close[4], close[1])
+btc_ret4  = (btc_close - nz(btc_close[4], btc_close[1])) / nz(btc_close[4], btc_close[1])
+f10       = nz(eur_ret4 - gold_ret4 + 0.15 * btc_ret4, 0.0) * 100.0
+
+net_move  = math.abs(close - nz(close[12], close[1]))
+sum_moves = math.sum(math.abs(close - close[1]), 12)
+er12      = sum_moves == 0 ? 0.0 : net_move / sum_moves
+
+// =========================================================================
+// 4. STAGE 1 FOUNDATION MODEL (MISTAKE-BOOSTED ON 4 YEARS <= AUG 31, 2026)
+// =========================================================================
+s1 = (f1 - 0.01953012) / 0.79001886
+s2 = (f2 - 0.03730998) / 1.12304857
+s3 = (f3 - 0.10593445) / 1.89056465
+s4 = (f4 - 0.13464267) / 1.62206381
+s5 = (f5 - 0.01604533) / 0.20919256
+s6 = (f6 - 0.00112772) / 0.18675215
+s7 = (f7 - 0.10933633) / 1.01378402
+s8 = (f8 - 0.43195090) / 3.37918442
+s9 = (f9 - 0.00826245) / 0.32977679
+s10 = (f10 - -0.00285844) / 0.23549351
+
+logit_lr = -0.07473991 + (s1 * 0.01134580) + (s2 * 0.00955967) + (s3 * -0.01583543) + (s4 * 0.01836520) + (s5 * -0.18677273) + (s6 * 0.09896625) + (s7 * 0.12826026) + (s8 * -0.00121685) + (s9 * -0.01441011) + (s10 * -0.00659868)
+p_lr = 1.0 / (1.0 + math.exp(-logit_lr))
+
+z_n0 = -0.08746478 + (s1 * -0.15738976) + (s2 * -0.19030432) + (s3 * -0.17093360) + (s4 * -0.21762508) + (s5 * -0.29248518) + (s6 * -0.24756029) + (s7 * -0.01061705) + (s8 * 0.00832379) + (s9 * -0.06677302) + (s10 * -0.00119012)
+h0 = (math.exp(2.0 * z_n0) - 1.0) / (math.exp(2.0 * z_n0) + 1.0)
+z_n1 = 0.37434880 + (s1 * 0.02995427) + (s2 * 0.01803607) + (s3 * 0.01113345) + (s4 * -0.00918739) + (s5 * -0.00520436) + (s6 * 0.01310593) + (s7 * -0.00597717) + (s8 * -0.00535708) + (s9 * 0.01474705) + (s10 * -0.01237474)
+h1 = (math.exp(2.0 * z_n1) - 1.0) / (math.exp(2.0 * z_n1) + 1.0)
+z_n2 = 0.17789059 + (s1 * 0.02059357) + (s2 * -0.01292093) + (s3 * -0.13073146) + (s4 * -0.14395981) + (s5 * 0.20084927) + (s6 * -0.30709207) + (s7 * 0.24761391) + (s8 * -0.03591041) + (s9 * -0.02708274) + (s10 * 0.04141683)
+h2 = (math.exp(2.0 * z_n2) - 1.0) / (math.exp(2.0 * z_n2) + 1.0)
+z_n3 = -0.99328623 + (s1 * -0.05806177) + (s2 * 0.00026980) + (s3 * 0.10586667) + (s4 * 0.11300054) + (s5 * 0.04368658) + (s6 * 0.04503808) + (s7 * 0.38980866) + (s8 * 0.46529563) + (s9 * -0.00116432) + (s10 * 0.01845222)
+h3 = (math.exp(2.0 * z_n3) - 1.0) / (math.exp(2.0 * z_n3) + 1.0)
+z_n4 = -0.21818196 + (s1 * -0.04733176) + (s2 * -0.05009185) + (s3 * -0.01879268) + (s4 * -0.04580434) + (s5 * -0.04772685) + (s6 * -0.03395651) + (s7 * 0.03775333) + (s8 * -0.01544588) + (s9 * -0.02100212) + (s10 * 0.00782581)
+h4 = (math.exp(2.0 * z_n4) - 1.0) / (math.exp(2.0 * z_n4) + 1.0)
+z_n5 = -0.42385123 + (s1 * -0.03282433) + (s2 * -0.01913288) + (s3 * -0.01169833) + (s4 * 0.01124939) + (s5 * 0.00533744) + (s6 * -0.01343093) + (s7 * 0.00600191) + (s8 * 0.00469137) + (s9 * -0.01644443) + (s10 * 0.01171247)
+h5 = (math.exp(2.0 * z_n5) - 1.0) / (math.exp(2.0 * z_n5) + 1.0)
+z_n6 = -0.14325130 + (s1 * -0.15865480) + (s2 * -0.17590324) + (s3 * -0.07520411) + (s4 * -0.12863489) + (s5 * -0.12137697) + (s6 * -0.08178040) + (s7 * 0.01705105) + (s8 * 0.03871411) + (s9 * -0.03783727) + (s10 * 0.04130015)
+h6 = (math.exp(2.0 * z_n6) - 1.0) / (math.exp(2.0 * z_n6) + 1.0)
+z_n7 = 0.29770933 + (s1 * 0.08292312) + (s2 * 0.00903192) + (s3 * 0.02497698) + (s4 * -0.04577596) + (s5 * -0.00309203) + (s6 * 0.03808021) + (s7 * 0.01747483) + (s8 * 0.00047146) + (s9 * 0.02235340) + (s10 * -0.05985809)
+h7 = (math.exp(2.0 * z_n7) - 1.0) / (math.exp(2.0 * z_n7) + 1.0)
+logit_mlp = 0.21980786 + (h0 * 0.34772385) + (h1 * 0.07233283) + (h2 * -0.35457552) + (h3 * 0.41014916) + (h4 * 0.05073332) + (h5 * -0.08469537) + (h6 * 0.16076656) + (h7 * 0.16244229)
+p_mlp = 1.0 / (1.0 + math.exp(-logit_mlp))
+
+base_raw_p = 0.55 * p_lr + 0.45 * p_mlp
+roll_mean  = ta.sma(base_raw_p, 200)
+roll_std   = ta.stdev(base_raw_p, 200) + 1e-10
+base_z     = (base_raw_p - roll_mean) / roll_std
+
+// =========================================================================
+// 5. STAGE 3 NATIVE PINE END-OF-DAY ONLINE MISTAKE LEARNER (PREQUENTIAL OGD)
+// =========================================================================
+var float dw1 = 0.0, var float dw2 = 0.0, var float dw3 = 0.0, var float dw4 = 0.0, var float dw5 = 0.0
+var float dw6 = 0.0, var float dw7 = 0.0, var float dw8 = 0.0, var float dw9 = 0.0, var float dw10 = 0.0
+var float daily_bias_z = 0.0
+
+var float g1 = 0.0, var float g2 = 0.0, var float g3 = 0.0, var float g4 = 0.0, var float g5 = 0.0
+var float g6 = 0.0, var float g7 = 0.0, var float g8 = 0.0, var float g9 = 0.0, var float g10 = 0.0
+var float err_sum = 0.0
+var int   day_samples = 0
+var int   cur_dom = -1
+var int   daily_updates_count = 0
+
+realized_10b_ret = (close - nz(close[10], close)) / nz(close[10], close)
+actual_dir       = realized_10b_ret > 0.0008 ? 1.0 : realized_10b_ret < -0.0008 ? -1.0 : 0.0
+
+past_z    = nz(base_z[10], 0.0) + (nz(s1[10])*dw1 + nz(s2[10])*dw2 + nz(s3[10])*dw3 + nz(s4[10])*dw4 + nz(s5[10])*dw5 + nz(s6[10])*dw6 + nz(s7[10])*dw7 + nz(s8[10])*dw8 + nz(s9[10])*dw9 + nz(s10[10])*dw10) + daily_bias_z
+past_pred = (math.exp(2.0 * past_z) - 1.0) / (math.exp(2.0 * past_z) + 1.0)
+
+if barstate.isconfirmed and actual_dir != 0.0
+    err = actual_dir - past_pred
+    g1 += err * nz(s1[10]), g2 += err * nz(s2[10]), g3 += err * nz(s3[10]), g4 += err * nz(s4[10]), g5 += err * nz(s5[10])
+    g6 += err * nz(s6[10]), g7 += err * nz(s7[10]), g8 += err * nz(s8[10]), g9 += err * nz(s9[10]), g10 += err * nz(s10[10])
+    err_sum += err
+    day_samples += 1
+
+if barstate.isconfirmed and dayofmonth(time) != cur_dom
+    if cur_dom != -1 and enable_online and day_samples >= 10
+        inv_n = 1.0 / day_samples
+        dw1  := math.min(0.35, math.max(-0.35, 0.90 * dw1  + online_eta * (g1  * inv_n)))
+        dw2  := math.min(0.35, math.max(-0.35, 0.90 * dw2  + online_eta * (g2  * inv_n)))
+        dw3  := math.min(0.35, math.max(-0.35, 0.90 * dw3  + online_eta * (g3  * inv_n)))
+        dw4  := math.min(0.35, math.max(-0.35, 0.90 * dw4  + online_eta * (g4  * inv_n)))
+        dw5  := math.min(0.35, math.max(-0.35, 0.90 * dw5  + online_eta * (g5  * inv_n)))
+        dw6  := math.min(0.35, math.max(-0.35, 0.90 * dw6  + online_eta * (g6  * inv_n)))
+        dw7  := math.min(0.35, math.max(-0.35, 0.90 * dw7  + online_eta * (g7  * inv_n)))
+        dw8  := math.min(0.35, math.max(-0.35, 0.90 * dw8  + online_eta * (g8  * inv_n)))
+        dw9  := math.min(0.35, math.max(-0.35, 0.90 * dw9  + online_eta * (g9  * inv_n)))
+        dw10 := math.min(0.35, math.max(-0.35, 0.90 * dw10 + online_eta * (g10 * inv_n)))
+        daily_bias_z := math.min(0.30, math.max(-0.30, 0.85 * daily_bias_z + 0.12 * (err_sum * inv_n)))
+        daily_updates_count += 1
+    cur_dom := dayofmonth(time)
+    g1 := 0.0, g2 := 0.0, g3 := 0.0, g4 := 0.0, g5 := 0.0
+    g6 := 0.0, g7 := 0.0, g8 := 0.0, g9 := 0.0, g10 := 0.0
+    err_sum := 0.0, day_samples := 0
+
+online_adj = enable_online ? (s1*dw1 + s2*dw2 + s3*dw3 + s4*dw4 + s5*dw5 + s6*dw6 + s7*dw7 + s8*dw8 + s9*dw9 + s10*dw10 + daily_bias_z) : 0.0
+total_z    = base_z + online_adj
+prob_disp  = 1.0 / (1.0 + math.exp(-total_z * 1.15))
+
+// =========================================================================
+// 6. REGIME-ALIGNED EXECUTION & PYRAMIDING ENGINE
+// =========================================================================
+calc_qty(pct_eq) =>
+    math.max(0.001, (strategy.equity * (pct_eq / 100.0)) / close)
+
+regime_ok  = in_date_window and (er12 >= er_min_val) and (shock_ratio <= 2.2) and (atr_ratio >= 0.65) and (atr_ratio <= 2.00)
+bull_macro = (close > ema200) and (ema50 >= ema200 * 0.999)
+bear_macro = (close < ema200) and (ema50 <= ema200 * 1.001)
+
+bull_trig = regime_ok and bull_macro and (total_z >= z_thresh) and (close > open) and (math.abs(f4) < 2.2)
+bear_trig = regime_ok and bear_macro and (total_z <= -z_thresh) and (close < open) and (math.abs(f4) < 2.2)
+
+bull_pct = total_z >= z_strong ? 65.0 : 35.0
+bear_pct = total_z <= -z_strong ? 65.0 : 35.0
+
+var int   entry_bar  = na
+var int   last_loss  = -999
+var float init_entry = na
+var float entry_atr  = na
+var float tp_level   = na
+var float sl_level   = na
+var bool  scaled_in  = false
+var float active_pct = 0.0
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    if strategy.closedtrades > 0 and strategy.closedtrades.profit(strategy.closedtrades - 1) < 0
+        last_loss := bar_index
+
+cooldown_ok = (bar_index - last_loss) >= 3
+
+if barstate.isconfirmed
+    if strategy.position_size == 0 and cooldown_ok
+        if bull_trig
+            strategy.entry("AI Long", strategy.long, qty=calc_qty(bull_pct), comment="L1 (" + str.tostring(bull_pct) + "%) " + str.tostring(math.round(prob_disp*100)) + "%")
+            entry_bar  := bar_index
+            init_entry := close
+            entry_atr  := atr14
+            tp_level   := close + (atr14 * tp_mult)
+            sl_level   := close - (atr14 * sl_mult)
+            scaled_in  := false
+            active_pct := bull_pct
+        else if bear_trig
+            strategy.entry("AI Short", strategy.short, qty=calc_qty(bear_pct), comment="S1 (" + str.tostring(bear_pct) + "%) " + str.tostring(math.round((1.0-prob_disp)*100)) + "%")
+            entry_bar  := bar_index
+            init_entry := close
+            entry_atr  := atr14
+            tp_level   := close - (atr14 * tp_mult)
+            sl_level   := close + (atr14 * sl_mult)
+            scaled_in  := false
+            active_pct := bear_pct
+
+    else if strategy.position_size > 0 and enable_pyr and not scaled_in
+        if (close >= init_entry + entry_atr * 0.50) and (total_z >= z_thresh)
+            strategy.entry("AI Long Scale", strategy.long, qty=calc_qty(35.0), comment="+Pyramid (35%)")
+            scaled_in  := true
+            active_pct := active_pct + 35.0
+            sl_level   := math.max(sl_level, init_entry)
+
+    else if strategy.position_size < 0 and enable_pyr and not scaled_in
+        if (close <= init_entry - entry_atr * 0.50) and (total_z <= -z_thresh)
+            strategy.entry("AI Short Scale", strategy.short, qty=calc_qty(35.0), comment="+Pyramid (35%)")
+            scaled_in  := true
+            active_pct := active_pct + 35.0
+            sl_level   := math.min(sl_level, init_entry)
+
+if strategy.position_size > 0
+    if high >= (init_entry + entry_atr * 0.85)
+        sl_level := math.max(sl_level, init_entry + entry_atr * 0.35)
+    strategy.exit("Exit Long", from_entry="AI Long", limit=tp_level, stop=sl_level)
+    strategy.exit("Exit Long Scale", from_entry="AI Long Scale", limit=tp_level, stop=sl_level)
+    if (bar_index - entry_bar) >= horizon_bars
+        strategy.close_all(comment="Horizon Exit")
+else if strategy.position_size < 0
+    if low <= (init_entry - entry_atr * 0.85)
+        sl_level := math.min(sl_level, init_entry - entry_atr * 0.35)
+    strategy.exit("Exit Short", from_entry="AI Short", limit=tp_level, stop=sl_level)
+    strategy.exit("Exit Short Scale", from_entry="AI Short Scale", limit=tp_level, stop=sl_level)
+    if (bar_index - entry_bar) >= horizon_bars
+        strategy.close_all(comment="Horizon Exit")
+
+if use_date_filter and not in_date_window and strategy.position_size != 0
+    strategy.close_all(comment="Window End")
+
+// =========================================================================
+// 7. OVERLAYS & CONTINUAL LEARNING TELEMETRY HUD
+// =========================================================================
+plot(ema50,  "EMA 50 Trend", color=color.new(color.aqua, 25), linewidth=2)
+plot(ema200, "1-Hour 50 EMA (Macro Regime)", color=color.new(color.yellow, 15), linewidth=2)
+plot(vwap32, "Session VWAP", color=color.new(color.fuchsia, 30), linewidth=1)
+
+var table hud = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 15), border_width=1)
+if barstate.islast
+    conf_pct = prob_disp >= 0.5 ? math.round(prob_disp * 100, 1) : math.round((1.0 - prob_disp) * 100, 1)
+    sig_txt  = bull_trig ? "BUY / LONG" : bear_trig ? "SELL / SHORT" : "WAIT / HOLD"
+    sig_col  = bull_trig ? color.green : bear_trig ? color.red : color.gray
+
+    table.cell(hud, 0, 0, "ML Architecture", text_color=color.white)
+    table.cell(hud, 1, 0, "4Yr Boosted + Daily OGD", text_color=color.yellow)
+    table.cell(hud, 0, 1, "Daily EOD Updates", text_color=color.white)
+    table.cell(hud, 1, 1, str.tostring(daily_updates_count) + " Days Adapted (Bias: " + str.tostring(math.round(daily_bias_z, 2)) + ")", text_color=color.aqua)
+    table.cell(hud, 0, 2, "Macro Structure", text_color=color.white)
+    table.cell(hud, 1, 2, bull_macro ? "BULL (>1H EMA50)" : bear_macro ? "BEAR (<1H EMA50)" : "TRANSITION", text_color=bull_macro ? color.lime : bear_macro ? color.red : color.orange)
+    table.cell(hud, 0, 3, "AI Conviction", text_color=color.white)
+    table.cell(hud, 1, 3, (total_z >= 0 ? "UP " : "DN ") + str.tostring(conf_pct) + "% (Z=" + str.tostring(math.round(total_z, 2)) + ")", text_color=color.white)
+    table.cell(hud, 0, 4, "Active Capital", text_color=color.white)
+    table.cell(hud, 1, 4, strategy.position_size != 0 ? str.tostring(active_pct) + "%" + (scaled_in ? " [PYRAMID]" : "") : "0% (Cash)", text_color=color.lime)
+    table.cell(hud, 0, 5, "Live Action", text_color=color.white)
+    table.cell(hud, 1, 5, sig_txt, bgcolor=sig_col, text_color=color.white)

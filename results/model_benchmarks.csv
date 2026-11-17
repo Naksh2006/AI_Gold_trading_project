@@ -1,0 +1,6 @@
+Model,Trades,Win_Rate_%,Profit_Factor,Max_DD_%,Net_PnL_%
+Baseline 1: Always Long (Buy & Hold Roll),62,33.87,0.48,4.85,-6.72
+Baseline 2: Standard RSI (30/70 Rule),19,26.32,0.14,3.4,-5.14
+Model 1: L2 Logistic Regression,28,67.86,1.65,0.47,0.54
+Model 2: Gradient Boosted Trees,1,0.0,0.0,0.12,-0.12
+Model 3: Hybrid Ensemble (L2-LR + Tanh MLP),21,71.43,2.29,0.49,0.81

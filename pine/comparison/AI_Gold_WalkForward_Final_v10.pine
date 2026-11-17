@@ -1,0 +1,324 @@
+//@version=5
+strategy("AI Gold Rolling Walk-Forward & Regime Master v10", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=35, pyramiding=2, commission_type=strategy.commission.percent, commission_value=0.008)
+
+// =========================================================================
+// 1. EVALUATION WINDOW (DEFAULT: FULL CHART OR CUSTOM VIVA WEEK)
+// =========================================================================
+use_date_filter = input.bool(false, "Restrict to Specific Date Window (Uncheck for Full Chart)", group="1. Evaluation Window")
+start_time      = input.time(timestamp("09 Nov 2026 00:00 +0000"), "Start Date (UTC)", group="1. Evaluation Window")
+end_time        = input.time(timestamp("16 Nov 2026 23:59 +0000"), "End Date (UTC)", group="1. Evaluation Window")
+block_sunday    = input.bool(true, "Block Illiquid Sunday Session", group="1. Evaluation Window")
+
+in_date_window = (not use_date_filter or (time >= start_time and time <= end_time)) and (not block_sunday or dayofweek != dayofweek.sunday)
+bgcolor(use_date_filter and in_date_window ? color.new(color.blue, 94) : na, title="Active Window")
+
+// =========================================================================
+// 2. WALK-FORWARD & SUB-REGIME PARAMETERS
+// =========================================================================
+conf_thresh  = input.float(0.58, "Walk-Forward AI Confidence Threshold (58%)", minval=0.52, maxval=0.72, step=0.01, group="2. Walk-Forward & Sub-Regime Settings")
+strong_th    = input.float(0.65, "Tier-2 High Conviction Threshold (65%)", minval=0.58, maxval=0.80, step=0.01, group="2. Walk-Forward & Sub-Regime Settings")
+er_min_val   = input.float(0.16, "Min Kaufman Efficiency Ratio", minval=0.05, maxval=0.35, step=0.01, group="2. Walk-Forward & Sub-Regime Settings")
+min_atr_rat  = input.float(0.70, "Min ATR Ratio vs 5-Day Avg (Blocks Dead Chop)", minval=0.40, maxval=1.20, step=0.05, group="2. Walk-Forward & Sub-Regime Settings")
+max_shock    = input.float(2.00, "Tier-1 Macro Release Shock Pause (ATR Multiple)", minval=1.40, maxval=3.50, step=0.10, group="2. Walk-Forward & Sub-Regime Settings")
+tp_mult      = input.float(1.8,  "Take Profit (ATR Multiplier)", minval=1.0, maxval=4.0, step=0.1, group="3. Risk & Pyramiding")
+sl_mult      = input.float(1.5,  "Stop Loss (ATR Multiplier)", minval=0.8, maxval=3.0, step=0.1, group="3. Risk & Pyramiding")
+trail_trig_m = input.float(0.85, "Profit Ratchet Trigger (ATR)", minval=0.4, maxval=2.0, step=0.05, group="3. Risk & Pyramiding")
+horizon_bars = input.int(10,     "Max Holding Horizon (Bars)", minval=4, maxval=24, group="3. Risk & Pyramiding")
+enable_pyr   = input.bool(true,  "Enable +35% Trend Pyramiding on Winners", group="3. Risk & Pyramiding")
+
+// =========================================================================
+// 3. CROSS-ASSET FEEDS & 8 STABLE ORTHOGONAL FEATURES
+// =========================================================================
+eur_close = request.security("BINANCE:EURUSDT", timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
+
+pine_rma(src, length) =>
+    alpha = 1.0 / length
+    var float sum = na
+    sum := na(sum[1]) ? ta.sma(src, length) : alpha * src + (1.0 - alpha) * nz(sum[1])
+    sum
+
+tr_val    = ta.tr(true)
+atr14     = pine_rma(tr_val, 14)
+atr_5d    = ta.sma(atr14, 480) + 1e-10
+atr_ratio = atr14 / atr_5d
+atr_pct   = (atr14 / close) + 1e-10
+
+bar_shock   = (high - low) / (atr14 + 1e-10)
+jump_shock  = math.abs(close - nz(close[2], close[1])) / (atr14 + 1e-10)
+shock_ratio = math.max(bar_shock, math.max(nz(bar_shock[1], 0.0), jump_shock / 1.4))
+
+ema50  = ta.ema(close, 50)
+ema200 = ta.ema(close, 200) // 1-Hour 50 EMA Anchor on 15m chart!
+
+typ_p  = (high + low + close) / 3.0
+vwap32 = math.sum(typ_p * volume, 32) / (math.sum(volume, 32) + 1e-10)
+
+f1 = ((close - nz(close[4], close[1])) / nz(close[4], close[1])) / atr_pct
+f2 = ((close - nz(close[12], close[1])) / nz(close[12], close[1])) / atr_pct
+f3 = ((close - vwap32) / close) / atr_pct
+f4 = ((ema50 - ema200) / close) / atr_pct
+
+delta = close - close[1]
+gain  = delta > 0 ? delta : 0.0
+loss  = delta < 0 ? -delta : 0.0
+rs14  = pine_rma(loss, 14) == 0 ? 0.0 : pine_rma(gain, 14) / pine_rma(loss, 14)
+rsi14 = 100.0 - (100.0 / (1.0 + rs14))
+f5    = (rsi14 - 50.0) / 50.0
+
+ema12     = ta.ema(close, 12)
+ema26     = ta.ema(close, 26)
+macd_line = ema12 - ema26
+macd_hist = macd_line - ta.ema(macd_line, 9)
+f6        = macd_hist / (atr14 + 1e-10)
+
+rng        = (high - low) + 1e-10
+signed_vol = ((close - open) / rng) * volume
+f7         = math.sum(signed_vol, 4) / (math.sum(volume, 4) + 1e-10)
+
+eur_ret4  = (eur_close - nz(eur_close[4], eur_close[1])) / nz(eur_close[4], eur_close[1])
+gold_ret4 = (close - nz(close[4], close[1])) / nz(close[4], close[1])
+f8        = nz(eur_ret4 + gold_ret4, 0.0) * 100.0
+
+net_move  = math.abs(close - nz(close[12], close[1]))
+sum_moves = math.sum(math.abs(close - close[1]), 12)
+er12      = sum_moves == 0 ? 0.0 : net_move / sum_moves
+
+h_utc     = hour(time)
+is_lon_ny = (h_utc >= 7 and h_utc <= 20)
+
+// =========================================================================
+// 4. ROLLING WALK-FORWARD EPOCH WEIGHT SCHEDULE (STRICTLY CAUSAL / ZERO LEAKAGE)
+// =========================================================================
+float w1 = 0.0, float w2 = 0.0, float w3 = 0.0, float w4 = 0.0
+float w5 = 0.0, float w6 = 0.0, float w7 = 0.0, float w8 = 0.0
+float b0 = 0.0, float p_m = 0.5, float p_s = 0.1
+int active_fold = 0
+if time >= 1788220800000 and time < 1788480000000
+    w1 := -0.07337055, w2 := -0.03157944, w3 := -0.12945771, w4 := 0.00279624
+    w5 := 0.22752463, w6 := 0.34056430, w7 := -0.25411238, w8 := 0.99791832
+    b0 := 0.01344726, p_m := 0.50027235, p_s := 0.07231035, active_fold := 0
+else if time >= 1788480000000 and time < 1788739200000
+    w1 := -0.07883989, w2 := -0.03650046, w3 := -0.10888461, w4 := -0.00570040
+    w5 := 0.62249759, w6 := 0.24148892, w7 := -0.41908279, w8 := 0.68589062
+    b0 := 0.01935276, p_m := 0.50504838, p_s := 0.06577305, active_fold := 1
+else if time >= 1788739200000 and time < 1788998400000
+    w1 := 0.00792350, w2 := -0.00516934, w3 := -0.06531902, w4 := -0.00667528
+    w5 := 0.61305112, w6 := -0.64401153, w7 := -0.53945427, w8 := 0.52755009
+    b0 := -0.01274586, p_m := 0.49994856, p_s := 0.06397586, active_fold := 2
+else if time >= 1788998400000 and time < 1789257600000
+    w1 := 0.02913418, w2 := 0.01053788, w3 := -0.04392732, w4 := 0.01202157
+    w5 := 0.09863218, w6 := -0.80789776, w7 := -0.56568302, w8 := 0.45284447
+    b0 := -0.01215554, p_m := 0.48908801, p_s := 0.08208371, active_fold := 3
+else if time >= 1789257600000 and time < 1789516800000
+    w1 := 0.02676933, w2 := 0.00231506, w3 := -0.03818356, w4 := 0.01127780
+    w5 := 0.34875984, w6 := -0.54341372, w7 := -0.73742310, w8 := 0.36363137
+    b0 := 0.00187041, p_m := 0.48847369, p_s := 0.07773752, active_fold := 4
+else if time >= 1789516800000 and time < 1789776000000
+    w1 := 0.11045792, w2 := 0.00005835, w3 := -0.11192143, w4 := -0.06003448
+    w5 := 0.43437802, w6 := -0.77024441, w7 := -1.06915173, w8 := 0.49417866
+    b0 := -0.11591029, p_m := 0.53914168, p_s := 0.14093478, active_fold := 5
+else if time >= 1789776000000 and time < 1790035200000
+    w1 := 0.04555016, w2 := 0.01184846, w3 := -0.16964472, w4 := -0.11120749
+    w5 := 0.44678460, w6 := -0.98248413, w7 := -0.61954503, w8 := 0.46359442
+    b0 := -0.16767255, p_m := 0.53976085, p_s := 0.17655267, active_fold := 6
+else if time >= 1790035200000 and time < 1790294400000
+    w1 := 0.04247617, w2 := 0.02440349, w3 := -0.18090365, w4 := -0.11759113
+    w5 := 0.66585375, w6 := -0.83114566, w7 := -0.61411699, w8 := 0.46496438
+    b0 := -0.07553418, p_m := 0.50913522, p_s := 0.13672029, active_fold := 7
+else if time >= 1790294400000 and time < 1790553600000
+    w1 := -0.10561833, w2 := 0.01188268, w3 := -0.12258421, w4 := -0.07535000
+    w5 := -1.32628439, w6 := 0.38450953, w7 := -0.23493652, w8 := 0.69109255
+    b0 := -0.09472445, p_m := 0.51733968, p_s := 0.13597725, active_fold := 8
+else if time >= 1790553600000 and time < 1790812800000
+    w1 := -0.08167235, w2 := 0.03516008, w3 := -0.05174238, w4 := -0.08912693
+    w5 := -1.26718086, w6 := -0.22148880, w7 := -0.00236668, w8 := 0.26974813
+    b0 := -0.15528357, p_m := 0.50251557, p_s := 0.12288416, active_fold := 9
+else if time >= 1790812800000 and time < 1791072000000
+    w1 := 0.09751762, w2 := 0.00648205, w3 := -0.16370293, w4 := -0.09069950
+    w5 := -0.86511660, w6 := 0.23672764, w7 := -0.17695962, w8 := -0.30927340
+    b0 := -0.14057065, p_m := 0.52276843, p_s := 0.14163828, active_fold := 10
+else if time >= 1791072000000 and time < 1791331200000
+    w1 := 0.01337247, w2 := 0.02189219, w3 := -0.07521563, w4 := -0.11074101
+    w5 := 0.09033581, w6 := -0.93973111, w7 := -0.09268636, w8 := 0.01930622
+    b0 := -0.19425312, p_m := 0.49884511, p_s := 0.12452452, active_fold := 11
+else if time >= 1791331200000 and time < 1791590400000
+    w1 := 0.12693235, w2 := -0.01408525, w3 := -0.04370100, w4 := -0.07531484
+    w5 := 0.22729088, w6 := -1.35251007, w7 := -0.19959494, w8 := 0.07081226
+    b0 := -0.11009437, p_m := 0.50171480, p_s := 0.11188531, active_fold := 12
+else if time >= 1791590400000 and time < 1791849600000
+    w1 := 0.09954636, w2 := -0.00223954, w3 := -0.04478656, w4 := -0.06947695
+    w5 := 0.28363489, w6 := -1.46477946, w7 := -0.22034536, w8 := 0.17251945
+    b0 := -0.12604761, p_m := 0.49780256, p_s := 0.10587753, active_fold := 13
+else if time >= 1791849600000 and time < 1792108800000
+    w1 := 0.09412934, w2 := 0.00664927, w3 := -0.02465380, w4 := -0.07983597
+    w5 := 0.75451483, w6 := -1.47040626, w7 := 0.07227497, w8 := -0.32966962
+    b0 := -0.11255431, p_m := 0.48782295, p_s := 0.12546328, active_fold := 14
+else if time >= 1792108800000 and time < 1792368000000
+    w1 := -0.12083081, w2 := 0.02589425, w3 := -0.07418501, w4 := -0.03700948
+    w5 := 0.64822476, w6 := -1.10105349, w7 := 0.32621260, w8 := 0.66729692
+    b0 := -0.02060835, p_m := 0.49833022, p_s := 0.08574092, active_fold := 15
+else if time >= 1792368000000 and time < 1792627200000
+    w1 := -0.19488006, w2 := 0.01843341, w3 := -0.06910678, w4 := -0.05316606
+    w5 := -0.51786920, w6 := -0.34072409, w7 := 0.53929671, w8 := 1.06309210
+    b0 := -0.02661996, p_m := 0.50169470, p_s := 0.11852209, active_fold := 16
+else if time >= 1792627200000 and time < 1792886400000
+    w1 := -0.16976341, w2 := -0.00223376, w3 := -0.06799322, w4 := -0.02699234
+    w5 := -0.16143681, w6 := -0.30028482, w7 := 0.48553325, w8 := 0.97878909
+    b0 := -0.00096069, p_m := 0.50110816, p_s := 0.08425180, active_fold := 17
+else if time >= 1792886400000 and time < 1793145600000
+    w1 := -0.26516502, w2 := 0.01389061, w3 := -0.01738769, w4 := -0.02067345
+    w5 := -0.10189867, w6 := -0.76089470, w7 := 0.70781220, w8 := 0.95657353
+    b0 := -0.00589029, p_m := 0.50213190, p_s := 0.08832077, active_fold := 18
+else if time >= 1793145600000 and time < 1793404800000
+    w1 := -0.18487443, w2 := -0.00733486, w3 := -0.03497042, w4 := 0.03125199
+    w5 := 0.66851501, w6 := -0.76626501, w7 := 0.56529330, w8 := 0.17438494
+    b0 := 0.05608985, p_m := 0.50567424, p_s := 0.09614535, active_fold := 19
+else if time >= 1793404800000 and time < 1793664000000
+    w1 := -0.14652950, w2 := -0.03543547, w3 := -0.03894267, w4 := 0.00718176
+    w5 := 0.14125852, w6 := -0.76543733, w7 := 0.40546738, w8 := 0.24404172
+    b0 := 0.00675801, p_m := 0.50309815, p_s := 0.09799898, active_fold := 20
+else if time >= 1793664000000 and time < 1793923200000
+    w1 := -0.16445398, w2 := -0.01538475, w3 := -0.03748024, w4 := -0.00248152
+    w5 := 1.29832746, w6 := -0.84824657, w7 := 0.14865337, w8 := 0.17029833
+    b0 := 0.04115033, p_m := 0.50594400, p_s := 0.07025194, active_fold := 21
+else if time >= 1793923200000 and time < 1794182400000
+    w1 := -0.06250752, w2 := 0.01277333, w3 := -0.19984730, w4 := -0.00850268
+    w5 := 1.96081680, w6 := -0.65976952, w7 := -0.13503255, w8 := 0.03913026
+    b0 := -0.02346720, p_m := 0.50246386, p_s := 0.07595129, active_fold := 22
+else if time >= 1794182400000 and time < 1794441600000
+    w1 := -0.07794559, w2 := 0.04841829, w3 := -0.13750668, w4 := -0.00914417
+    w5 := 1.05639688, w6 := -0.26325348, w7 := -0.06456883, w8 := -0.00313641
+    b0 := -0.02774217, p_m := 0.50185638, p_s := 0.04953662, active_fold := 23
+else if time >= 1794441600000 and time < 1794700800000
+    w1 := -0.07733523, w2 := 0.05090215, w3 := -0.09606479, w4 := -0.04133132
+    w5 := 0.36008494, w6 := -0.19026854, w7 := -0.05891394, w8 := 0.11968713
+    b0 := -0.01952904, p_m := 0.53355530, p_s := 0.10539859, active_fold := 24
+else
+    w1 := 0.03237438, w2 := 0.09746197, w3 := -0.14889250, w4 := -0.01511698
+    w5 := 0.92669728, w6 := -0.25726171, w7 := -0.46986766, w8 := 0.17530484
+    b0 := -0.00384699, p_m := 0.51217141, p_s := 0.06347711, active_fold := 25
+
+logit   = b0 + f1*w1 + f2*w2 + f3*w3 + f4*w4 + f5*w5 + f6*w6 + f7*w7 + f8*w8
+raw_p   = 1.0 / (1.0 + math.exp(-logit))
+prob_up = 1.0 / (1.0 + math.exp(-((raw_p - p_m) / (p_s * 0.80))))
+prob_dn = 1.0 - prob_up
+
+// =========================================================================
+// 5. SUB-REGIME EXECUTION ENGINE (ASIAN MEAN-REV VS LONDON/NY TREND)
+// =========================================================================
+calc_qty(pct_eq) =>
+    math.max(0.001, (strategy.equity * (pct_eq / 100.0)) / close)
+
+vol_ok   = (atr_ratio >= min_atr_rat) and (atr_ratio <= 1.85)
+shock_ok = (shock_ratio <= max_shock)
+gate_ok  = in_date_window and vol_ok and shock_ok
+
+// Sub-Regime A: London / NY Trend & Pullback (07:00 - 20:00 UTC)
+lon_ny_short = is_lon_ny and (er12 >= er_min_val) and (close < ema200) and (ema50 < ema200) and (prob_dn >= conf_thresh) and (f6 < 0.15) and (f3 > -2.0)
+lon_ny_long  = is_lon_ny and (er12 >= er_min_val) and (close > ema200) and (ema50 > ema200) and (prob_up >= conf_thresh) and (f6 > -0.15) and (f3 < 2.0)
+
+// Sub-Regime B: Asian Session VWAP Mean-Reversion (00:00 - 07:00 UTC, Calm ATR)
+asian_short  = (not is_lon_ny) and (atr_ratio <= 1.35) and (er12 >= er_min_val - 0.02) and (close < ema200) and (close > vwap32) and (close < open) and (prob_dn >= conf_thresh - 0.02)
+asian_long   = (not is_lon_ny) and (atr_ratio <= 1.35) and (er12 >= er_min_val - 0.02) and (close > ema200) and (close < vwap32) and (close > open) and (prob_up >= conf_thresh - 0.02)
+
+bull_trig = gate_ok and (lon_ny_long or asian_long)
+bear_trig = gate_ok and (lon_ny_short or asian_short)
+
+bull_pct  = (lon_ny_long and prob_up >= strong_th) ? 65.0 : 35.0
+bear_pct  = (lon_ny_short and prob_dn >= strong_th) ? 65.0 : 35.0
+
+var int   entry_bar  = na
+var int   last_loss  = -999
+var float init_entry = na
+var float entry_atr  = na
+var float tp_level   = na
+var float sl_level   = na
+var bool  scaled_in  = false
+var float active_pct = 0.0
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    if strategy.closedtrades > 0 and strategy.closedtrades.profit(strategy.closedtrades - 1) < 0
+        last_loss := bar_index
+
+cooldown_ok = (bar_index - last_loss) >= 3
+
+if barstate.isconfirmed
+    if strategy.position_size == 0 and cooldown_ok
+        if bull_trig
+            strategy.entry("WF Long", strategy.long, qty=calc_qty(bull_pct), comment="WF BUY (" + str.tostring(bull_pct) + "%) " + str.tostring(math.round(prob_up*100)) + "%")
+            entry_bar  := bar_index
+            init_entry := close
+            entry_atr  := atr14
+            tp_level   := close + (atr14 * tp_mult)
+            sl_level   := close - (atr14 * sl_mult)
+            scaled_in  := false
+            active_pct := bull_pct
+        else if bear_trig
+            strategy.entry("WF Short", strategy.short, qty=calc_qty(bear_pct), comment="WF SELL (" + str.tostring(bear_pct) + "%) " + str.tostring(math.round(prob_dn*100)) + "%")
+            entry_bar  := bar_index
+            init_entry := close
+            entry_atr  := atr14
+            tp_level   := close - (atr14 * tp_mult)
+            sl_level   := close + (atr14 * sl_mult)
+            scaled_in  := false
+            active_pct := bear_pct
+
+    else if strategy.position_size > 0 and enable_pyr and not scaled_in
+        if (close >= init_entry + entry_atr * 0.50) and (prob_up >= conf_thresh)
+            strategy.entry("WF Long Scale", strategy.long, qty=calc_qty(35.0), comment="+Pyramid (35%)")
+            scaled_in  := true
+            active_pct := active_pct + 35.0
+            sl_level   := math.max(sl_level, init_entry)
+
+    else if strategy.position_size < 0 and enable_pyr and not scaled_in
+        if (close <= init_entry - entry_atr * 0.50) and (prob_dn >= conf_thresh)
+            strategy.entry("WF Short Scale", strategy.short, qty=calc_qty(35.0), comment="+Pyramid (35%)")
+            scaled_in  := true
+            active_pct := active_pct + 35.0
+            sl_level   := math.min(sl_level, init_entry)
+
+if strategy.position_size > 0
+    if high >= (init_entry + entry_atr * trail_trig_m)
+        sl_level := math.max(sl_level, init_entry + entry_atr * 0.35)
+    strategy.exit("Exit Long", from_entry="WF Long", limit=tp_level, stop=sl_level)
+    strategy.exit("Exit Long Scale", from_entry="WF Long Scale", limit=tp_level, stop=sl_level)
+    if (bar_index - entry_bar) >= horizon_bars
+        strategy.close_all(comment="Horizon Exit")
+else if strategy.position_size < 0
+    if low <= (init_entry - entry_atr * trail_trig_m)
+        sl_level := math.min(sl_level, init_entry - entry_atr * 0.35)
+    strategy.exit("Exit Short", from_entry="WF Short", limit=tp_level, stop=sl_level)
+    strategy.exit("Exit Short Scale", from_entry="WF Short Scale", limit=tp_level, stop=sl_level)
+    if (bar_index - entry_bar) >= horizon_bars
+        strategy.close_all(comment="Horizon Exit")
+
+if use_date_filter and not in_date_window and strategy.position_size != 0
+    strategy.close_all(comment="Window End")
+
+// =========================================================================
+// 6. OVERLAYS & WALK-FORWARD TELEMETRY HUD
+// =========================================================================
+plot(ema200, "1-Hour 50 EMA (Macro Structure)", color=color.new(color.yellow, 10), linewidth=2)
+plot(ema50,  "15m EMA 50", color=color.new(color.aqua, 30), linewidth=1)
+plot(vwap32, "Session VWAP", color=color.new(color.fuchsia, 25), linewidth=2)
+
+var table hud = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 15), border_width=1)
+if barstate.islast
+    conf_pct = prob_up >= 0.5 ? math.round(prob_up * 100, 1) : math.round(prob_dn * 100, 1)
+    sess_txt = is_lon_ny ? "LONDON/NY (TREND)" : "ASIAN (VWAP REV)"
+    reg_txt  = close < ema200 ? "BEARISH (<1H EMA50)" : "BULLISH (>1H EMA50)"
+    sig_txt  = not shock_ok ? "PAUSED (MACRO SHOCK)" : bull_trig ? "BUY / LONG" : bear_trig ? "SELL / SHORT" : "WAIT / FILTERED"
+    sig_col  = not shock_ok ? color.orange : bull_trig ? color.green : bear_trig ? color.red : color.gray
+
+    table.cell(hud, 0, 0, "ML Methodology", text_color=color.white)
+    table.cell(hud, 1, 0, "18d Rolling Walk-Forward (Fold #" + str.tostring(active_fold) + ")", text_color=color.yellow)
+    table.cell(hud, 0, 1, "Macro Structure", text_color=color.white)
+    table.cell(hud, 1, 1, reg_txt, text_color=close < ema200 ? color.red : color.lime)
+    table.cell(hud, 0, 2, "Session Sub-Regime", text_color=color.white)
+    table.cell(hud, 1, 2, sess_txt, text_color=color.aqua)
+    table.cell(hud, 0, 3, "Volatility vs 5d Avg", text_color=color.white)
+    table.cell(hud, 1, 3, str.tostring(math.round(atr_ratio, 2)) + "x (" + (vol_ok ? "ACTIVE" : "PAUSED") + ")", text_color=vol_ok ? color.lime : color.orange)
+    table.cell(hud, 0, 4, "AI Conviction", text_color=color.white)
+    table.cell(hud, 1, 4, (prob_up >= 0.5 ? "UP " : "DN ") + str.tostring(conf_pct) + "%", text_color=color.white)
+    table.cell(hud, 0, 5, "Live Action", text_color=color.white)
+    table.cell(hud, 1, 5, sig_txt, bgcolor=sig_col, text_color=color.white)

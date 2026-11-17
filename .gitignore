@@ -1,0 +1,80 @@
+# =========================================================================
+# AI GOLD QUANTITATIVE TRADING SYSTEM — GITIGNORE
+# =========================================================================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# C extensions & build distribution
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE & Editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+.project
+.pydevproject
+.settings/
+
+# macOS / Windows OS artifacts
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Temporary / Scratch & Logs
+*.log
+*.tmp
+scratch/
+.pytest_cache/
+
+# Large raw datasets & binary weights (keep tracking results CSVs!)
+data/cache/*.csv
+!data/cache/.gitkeep
+paxg_features.csv
+*.pkl
+
+# Explicitly ensure all quantitative results and screenshots are tracked
+!results/**/*.csv
+!results/**/*.md
+!results/screenshots/**
+!results/metrics/**
