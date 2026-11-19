@@ -14,14 +14,18 @@ def pine_rma(series, length):
     return series.ewm(alpha=1.0 / length, adjust=False).mean()
 
 # =========================================================================
-# 1. LOAD CACHED CSVs + AUTO-SYNC LATEST LIVE CANDLES UP TO RIGHT NOW
+# 1. LOAD CACHED CSVs + PAGINATED AUTO-SYNC UP TO RIGHT NOW
 # =========================================================================
 def sync_latest_binance_bars(df_existing, symbol, interval="15m"):
     try:
-        last_ts_ms = int(df_existing["datetime"].max().timestamp() * 1000) + 1
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&startTime={last_ts_ms}&limit=1000"
-        r = requests.get(url, timeout=8).json()
-        if isinstance(r, list) and len(r) > 0:
+        df_cur = df_existing[["datetime", "open", "high", "low", "close", "volume"]].copy()
+        total_added = 0
+        for _ in range(5):
+            last_ts_ms = int(df_cur["datetime"].max().timestamp() * 1000) + 1
+            url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&startTime={last_ts_ms}&limit=1000"
+            r = requests.get(url, timeout=8).json()
+            if not (isinstance(r, list) and len(r) > 0):
+                break
             cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume',
                     'close_time', 'qav', 'trades', 'tbbav', 'tbqav', 'ignore']
             df_new = pd.DataFrame(r, columns=cols)
@@ -29,10 +33,13 @@ def sync_latest_binance_bars(df_existing, symbol, interval="15m"):
             for c in ["open", "high", "low", "close", "volume"]:
                 df_new[c] = pd.to_numeric(df_new[c])
             df_new = df_new[["datetime", "open", "high", "low", "close", "volume"]]
-            df_combined = pd.concat([df_existing[["datetime", "open", "high", "low", "close", "volume"]], df_new])
-            df_combined = df_combined.drop_duplicates("datetime").sort_values("datetime").reset_index(drop=True)
-            print(f"   Synced +{len(df_new)} live {symbol} bars up to {df_combined['datetime'].max()} UTC")
-            return df_combined
+            df_cur = pd.concat([df_cur, df_new]).drop_duplicates("datetime").sort_values("datetime").reset_index(drop=True)
+            total_added += len(df_new)
+            if len(r) < 1000:
+                break
+        if total_added > 0:
+            print(f"   Synced +{total_added} live {symbol} bars up to {df_cur['datetime'].max()} UTC")
+        return df_cur
     except Exception as e:
         print(f"   Offline build mode for {symbol} (Browser will sync live REST/WebSocket automatically): {e}")
     return df_existing
@@ -313,7 +320,7 @@ body {{
   padding: 16px 22px 32px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
 }}
 
 /* TOP NAVBAR */
@@ -329,6 +336,64 @@ body {{
   gap: 14px;
   box-shadow: var(--shadow-sm);
 }}
+
+/* DAILY INSPECTOR & CUSTOM TIMEFRAME BAR */
+.range-strip {{
+  background: var(--bg-card);
+  border: 1px solid var(--border-col);
+  border-radius: 12px;
+  padding: 10px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  box-shadow: var(--shadow-sm);
+}}
+.range-section {{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}}
+.range-label {{
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}}
+.date-input {{
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 600;
+  height: 32px;
+  padding: 0 9px;
+  background: var(--bg-subtle);
+  color: var(--text-main);
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  cursor: pointer;
+}}
+.sm-btn {{
+  font-family: 'Inter', sans-serif;
+  font-size: 12px;
+  font-weight: 600;
+  height: 32px;
+  padding: 0 10px;
+  background: var(--bg-subtle);
+  color: var(--text-main);
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}}
+.sm-btn:hover {{ background: var(--bg-hover); }}
+.sm-btn.primary {{ background: var(--accent-primary); color: #fff; border-color: var(--accent-primary); }}
+.sm-btn.success {{ background: var(--up-col); color: #fff; border-color: var(--up-col); }}
+.clickable-row {{ cursor: pointer; }}
+.clickable-row:hover td:first-child {{ color: var(--accent-primary); text-decoration: underline; }}
+
 .brand-group {{ display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }}
 .brand-logo {{
   width: 36px; height: 36px; border-radius: 9px;
@@ -514,6 +579,19 @@ button.clean-btn.success {{ background: var(--up-col); color: #fff; border-color
   color: var(--text-main); font-family: 'JetBrains Mono', monospace; font-size: 12.5px; font-weight: 600;
 }}
 
+.journal-textarea {{
+  width: 100%;
+  min-height: 110px;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-subtle);
+  color: var(--text-main);
+  font-family: 'Inter', sans-serif;
+  font-size: 13px;
+  resize: vertical;
+}}
+
 .up {{ color: var(--up-col); }}
 .down {{ color: var(--dn-col); }}
 .warn {{ color: var(--warn-col); }}
@@ -550,7 +628,7 @@ button.clean-btn.success {{ background: var(--up-col); color: #fff; border-color
         <span id="livePrice" class="live-price up">$3,882.40</span>
         <span id="liveDelta" class="pill-badge pill-up">+0.18%</span>
         <span id="spreadBadge" class="pill-badge pill-neutral">Spread: $0.12</span>
-        <span id="activeTimestamp" class="pill-badge pill-neutral">2026-11-16 UTC</span>
+        <span id="activeTimestamp" class="pill-badge pill-neutral">UTC</span>
       </div>
     </div>
 
@@ -564,28 +642,30 @@ button.clean-btn.success {{ background: var(--up-col); color: #fff; border-color
       </div>
 
       <div class="ctrl-group">
-        <span class="ctrl-label">Evaluation Window</span>
+        <span class="ctrl-label">Quick Period Preset</span>
         <select id="periodSelect" class="clean-select" onchange="onPeriodChange()">
+          <option value="TODAY">Today (Live Daily UTC)</option>
+          <option value="YESTERDAY">Yesterday (Full Day UTC)</option>
+          <option value="LAST_24H">Rolling Last 24 Hours</option>
+          <option value="LAST_3D">Last 3 Days</option>
+          <option value="LAST_7D" selected>Last 7 Days (Live)</option>
+          <option value="LAST_30D">Last 30 Days</option>
           <option value="OOS_WEEK">OOS Test Week + Live (Nov 09 – Now)</option>
           <option value="SEP_NOV">Validation + OOS (Sep 01 – Now)</option>
-          <option value="6M">Last 6 Months (May 2026 – Now)</option>
-          <option value="1Y">Full 1 Year (Nov 2025 – Now)</option>
-          <option value="2026-11-09">Single Day: Mon Nov 09, 2026</option>
-          <option value="2026-11-10">Single Day: Tue Nov 10, 2026</option>
-          <option value="2026-11-11">Single Day: Wed Nov 11, 2026</option>
-          <option value="2026-11-12">Single Day: Thu Nov 12, 2026</option>
-          <option value="2026-11-13">Single Day: Fri Nov 13, 2026</option>
-          <option value="2026-11-14">Single Day: Sat Nov 14, 2026</option>
-          <option value="2026-11-16">Single Day: Mon Nov 16, 2026 (Live)</option>
+          <option value="6M">Last 6 Months</option>
+          <option value="1Y">Full 1 Year</option>
+          <option value="CUSTOM">Custom Date & Time Range</option>
         </select>
       </div>
 
       <div class="ctrl-group">
-        <span class="ctrl-label">Timeframe</span>
+        <span class="ctrl-label">Candle Timeframe</span>
         <select id="tfSelect" class="clean-select" onchange="onTimeframeChange()">
           <option value="AUTO" selected>Auto Resolution</option>
           <option value="15m">15m Intraday</option>
+          <option value="30m">30m Intraday</option>
           <option value="1H">1H Hourly</option>
+          <option value="2H">2H Intraday</option>
           <option value="4H">4H Swing</option>
           <option value="1D">1D Daily</option>
         </select>
@@ -602,12 +682,36 @@ button.clean-btn.success {{ background: var(--up-col); color: #fff; border-color
     </div>
   </header>
 
+  <!-- DAILY INSPECTOR & CUSTOM DATE/TIME RANGE BAR -->
+  <section class="range-strip">
+    <div class="range-section">
+      <span class="range-label">Daily Inspector:</span>
+      <button class="sm-btn" onclick="stepSingleDay(-1)">◀ Prev Day</button>
+      <input type="date" id="dailyDatePicker" class="date-input" onchange="jumpToSingleDay(this.value)">
+      <button class="sm-btn" onclick="stepSingleDay(1)">Next Day ▶</button>
+      <button class="sm-btn success" onclick="jumpToToday()">Today (Live)</button>
+    </div>
+
+    <div class="range-section">
+      <span class="range-label">Custom Window (UTC):</span>
+      <input type="datetime-local" id="customStartInput" class="date-input">
+      <span style="color:var(--text-muted);font-weight:700;">to</span>
+      <input type="datetime-local" id="customEndInput" class="date-input">
+      <button class="sm-btn primary" onclick="applyCustomDateRange()">Apply Range</button>
+    </div>
+
+    <div class="range-section">
+      <span class="pill-badge pill-neutral" id="activeWindowSummary">Window: --</span>
+      <button class="sm-btn" onclick="openJournalModal()">Daily Notes</button>
+      <button class="sm-btn" onclick="exportWindowCSV()" title="Download trades for this selected timeframe as CSV">⬇ Export CSV</button>
+    </div>
+  </section>
+
   <!-- 5 SPACIOUS KPI CARDS -->
   <section class="kpi-grid" id="kpiGrid"></section>
 
   <!-- MAIN WORKSPACE: CHART (67%) + AI SIGNAL, MATH & STRATEGY STUDIO (33%) -->
   <div class="main-grid">
-    <!-- LEFT: INTERACTIVE CHART CARD -->
     <section class="card">
       <div class="card-header">
         <div style="display:flex;align-items:center;gap:10px;">
@@ -679,16 +783,13 @@ button.clean-btn.success {{ background: var(--up-col); color: #fff; border-color
         </div>
       </div>
 
-      <!-- DEDICATED WRAPPING OHLC & INDICATOR READOUT STRIP -->
       <div class="ohlc-bar" id="ohlcReadoutBar"></div>
 
-      <!-- MAIN CANVAS + ON-CHART LIVE POSITION HUD BOX -->
       <div style="position:relative;width:100%;height:475px;">
         <div class="chart-hud-overlay" id="onChartPositionHud"></div>
         <canvas id="mainPriceCanvas" style="width:100%;height:100%;display:block;"></canvas>
       </div>
 
-      <!-- BAR-BY-BAR REPLAY SCRUBBER -->
       <div class="replay-bar">
         <div style="display:flex;align-items:center;gap:8px;">
           <span style="font-size:12px;font-weight:600;color:var(--text-secondary);">Bar Replay & Live Sync:</span>
@@ -704,7 +805,6 @@ button.clean-btn.success {{ background: var(--up-col); color: #fff; border-color
       </div>
     </section>
 
-    <!-- RIGHT: AI SIGNAL, 12-FEAT MATH & INTERACTIVE STRATEGY SETTINGS STUDIO -->
     <section class="card">
       <div class="card-header">
         <span class="card-title">AI Signal & Strategy Studio</span>
@@ -718,14 +818,13 @@ button.clean-btn.success {{ background: var(--up-col); color: #fff; border-color
     </section>
   </div>
 
-  <!-- BOTTOM ROW: EQUITY CURVE & PERIOD BREAKDOWN (46%) + LIFECYCLE LOG & BENCHMARKS (54%) -->
+  <!-- BOTTOM ROW -->
   <div class="bottom-grid">
-    <!-- LEFT: EQUITY CURVE & MONTHLY/DAILY BREAKDOWN -->
     <section class="card">
       <div class="card-header">
         <div>
           <span class="card-title">Cumulative Strategy Equity vs. Buy & Hold</span>
-          <div style="font-size:12px;color:var(--text-muted);">Compounded return across completed & floating positions</div>
+          <div style="font-size:12px;color:var(--text-muted);">Click any Date row below to inspect that single day</div>
         </div>
         <div style="display:flex;gap:12px;font-size:12px;font-weight:600;">
           <span class="up">● AI Strategy</span>
@@ -746,7 +845,6 @@ button.clean-btn.success {{ background: var(--up-col); color: #fff; border-color
       </div>
     </section>
 
-    <!-- RIGHT: TABBED LIFECYCLE EVENT LOG (OPEN + SCALE + CLOSE), ROUND-TRIP TRADES, BENCHMARKS & MATRIX -->
     <section class="card">
       <div class="card-header">
         <span class="card-title">Position Entry / Closing Lifecycle Log & Audit</span>
@@ -777,7 +875,7 @@ button.clean-btn.success {{ background: var(--up-col); color: #fff; border-color
           <span class="pill-badge pill-neutral" id="modalLseBadge">Standby</span>
         </div>
         <p style="font-size:12.5px;color:var(--text-secondary);margin-bottom:10px;">
-          Streams real-time institutional Spot Gold (<b>XAU/USD</b>) and <b>EUR/USD</b> ticks over <code>wss://data-ws.londonstrategicedge.com</code>. You can freely switch between <b>PAXG/USDT</b> and <b>XAU/USD</b> in the top dropdown at any time!
+          Streams real-time institutional Spot Gold (<b>XAU/USD</b>) and <b>EUR/USD</b> ticks over <code>wss://data-ws.londonstrategicedge.com</code>.
         </p>
         <div style="display:flex;gap:8px;">
           <input type="password" id="lseApiKeyInput" class="clean-input mono" style="flex:1;cursor:text;" placeholder="Paste your London Strategic Edge API Key (e.g. lse_...)">
@@ -791,11 +889,32 @@ button.clean-btn.success {{ background: var(--up-col); color: #fff; border-color
           <span class="pill-badge pill-up" id="modalBinanceBadge">Active & Auto-Syncing</span>
         </div>
         <p style="font-size:12.5px;color:var(--text-secondary);margin-bottom:10px;">
-          Automatically syncs missing 15m candles via <code>api.binance.com/api/v3/klines</code> and streams live <b>PAXG/USDT</b> ticks over <code>wss://stream.binance.com:9443</code>.
+          Automatically paginates and syncs all missing 15m candles via <code>api.binance.com/api/v3/klines</code> up to the current minute and streams live <b>PAXG/USDT</b> candles over WebSocket.
         </p>
         <div style="display:flex;gap:8px;align-items:center;justify-content:space-between;">
           <span class="mono" style="font-size:12px;color:var(--text-muted);" id="syncLogStatus">Ready to sync latest 15m candles.</span>
           <button class="clean-btn success" onclick="syncBinanceGapCandles()">↻ Fetch Latest 15m Candles Now</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: DAILY JOURNAL RECORDER -->
+<div class="modal-backdrop" id="journalModal" onclick="if(event.target.id==='journalModal') this.classList.remove('open')">
+  <div class="modal-card" onclick="event.stopPropagation()">
+    <div class="card-header">
+      <span class="card-title">Daily Trading Record & Notes (<span id="journalDateTitle">--</span>)</span>
+      <button class="clean-btn" style="height:28px;padding:0 10px;" onclick="document.getElementById('journalModal').classList.remove('open')">✕ Close</button>
+    </div>
+    <div style="padding:18px;display:flex;flex-direction:column;gap:12px;">
+      <div class="pill-badge pill-neutral" id="journalMetricsSnapshot" style="justify-content:space-between;padding:8px 12px;"></div>
+      <textarea id="journalNoteInput" class="journal-textarea" placeholder="Record today's market regime, macro events (CPI/Fed/DXY), signal quality, or tweaks tested..."></textarea>
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <span class="mono" style="font-size:11.5px;color:var(--text-muted);" id="journalSaveStatus">Saved locally per date in browser storage.</span>
+        <div style="display:flex;gap:8px;">
+          <button class="clean-btn" onclick="exportWindowCSV()">⬇ Download Window CSV</button>
+          <button class="clean-btn primary" onclick="saveDailyJournalNote()">Save Daily Note</button>
         </div>
       </div>
     </div>
@@ -813,6 +932,7 @@ let ALL_15M_BARS = DATA.bars.map((r, idx) => {{
     t: iso.slice(0, 16).replace("T", " "),
     d: iso.slice(0, 10),
     m: iso.slice(0, 7),
+    hr: dt.getUTCHours(),
     dow: dt.getUTCDay(),
     o: r[1], h: r[2], l: r[3], c: r[4], v: r[5],
     atr: r[6], vwap: r[7],
@@ -827,7 +947,6 @@ let ALL_15M_BARS = DATA.bars.map((r, idx) => {{
   }};
 }});
 
-// Default Strategy Settings (Unchanged as requested!)
 let CFG = {{
   conf_th: 0.62,
   strong_th: 0.68,
@@ -849,8 +968,8 @@ let CFG = {{
 }};
 
 let SIM_TRADES = [];
-let EXEC_EVENTS = []; // Discrete chronological ENTRY, PYRAMID, and EXIT events!
-let selectedAsset = "PAXG"; // Never hijacked by background LSE ticks!
+let EXEC_EVENTS = [];
+let selectedAsset = "PAXG";
 let priceOffset = 0.0;
 let liveSpotXauPrice = null;
 let liveXauSpread = 0.22;
@@ -861,11 +980,42 @@ let activeTfLabel = "15m";
 let cursorIdx = 0;
 let zoomBars = 320;
 let inspectorTab = "signal";
-let auditTab = "events"; // Default to Entry & Closing Lifecycle Log!
+let auditTab = "events";
+let customStartTs = null;
+let customEndTs = null;
+let lastRenderedPeriodTrades = [];
+let lastKpiSummary = "";
 
 let binanceWs = null;
 let lseWs = null;
 let lsePingTimer = null;
+
+// =========================================================================
+// TIMEFRAME & CUSTOM DATE/TIME HELPERS
+// =========================================================================
+function tsToUtcInputVal(tsSec) {{
+  return new Date(tsSec * 1000).toISOString().slice(0, 16);
+}}
+function utcInputValToTs(str) {{
+  if (!str) return null;
+  const ms = Date.parse(str + ":00Z");
+  return isNaN(ms) ? null : Math.floor(ms / 1000);
+}}
+function getGroupSize(tf) {{
+  if (tf === "30m") return 2;
+  if (tf === "1H") return 4;
+  if (tf === "2H") return 8;
+  if (tf === "4H") return 16;
+  if (tf === "1D") return 96;
+  return 1;
+}}
+function getSessionBucket(hrUtc) {{
+  if (hrUtc < 8) return "1. Asia (00–08 UTC)";
+  if (hrUtc < 13) return "2. London (08–13 UTC)";
+  if (hrUtc < 17) return "3. NY Overlap (13–17 UTC)";
+  if (hrUtc < 21) return "4. NY Afternoon (17–21 UTC)";
+  return "5. After-Hours (21–24 UTC)";
+}}
 
 // =========================================================================
 // 1. IN-BROWSER NEURAL + LOGISTIC FORWARD PASS & LIFECYCLE BACKTEST ENGINE
@@ -1009,90 +1159,40 @@ function runFastBrowserBacktest() {{
       const conf_pct = Number(((direction === 1 ? p : 1.0 - p) * 100).toFixed(1));
 
       const tr_obj = {{
-        id: tId,
-        b: i,
-        exit_b: exit_bar_idx,
-        pyr_b: pyr_bar_idx,
-        ts: b.ts,
-        exit_ts: exitBarObj.ts,
-        t: b.t,
-        exit_t: exitBarObj.t,
-        d: b.d,
-        m: b.m,
-        dir: direction === 1 ? "LONG" : "SHORT",
-        dir_num: direction,
-        init_pct: init_pct,
-        total_pct: total_pct,
-        pyramided: pyramided,
-        pyr_price: Number(entry2.toFixed(2)),
-        tier: tier_str,
-        en: Number(entry1.toFixed(2)),
-        ex: Number(exit_p.toFixed(2)),
-        tp: Number(tp_price.toFixed(2)),
-        init_sl: Number(init_sl.toFixed(2)),
-        final_sl: Number(sl_price.toFixed(2)),
-        ratchet_locked: ratchet_locked,
-        bars_held: bars_held,
-        prob: conf_pct,
-        ret: Number(tot_ret.toFixed(3)),
-        st: status
+        id: tId, b: i, exit_b: exit_bar_idx, pyr_b: pyr_bar_idx,
+        ts: b.ts, exit_ts: exitBarObj.ts, t: b.t, exit_t: exitBarObj.t,
+        d: b.d, m: b.m, hr: b.hr,
+        dir: direction === 1 ? "LONG" : "SHORT", dir_num: direction,
+        init_pct: init_pct, total_pct: total_pct,
+        pyramided: pyramided, pyr_price: Number(entry2.toFixed(2)),
+        tier: tier_str, en: Number(entry1.toFixed(2)), ex: Number(exit_p.toFixed(2)),
+        tp: Number(tp_price.toFixed(2)), init_sl: Number(init_sl.toFixed(2)),
+        final_sl: Number(sl_price.toFixed(2)), ratchet_locked: ratchet_locked,
+        bars_held: bars_held, prob: conf_pct, ret: Number(tot_ret.toFixed(3)), st: status
       }};
       trades.push(tr_obj);
       b.sig = tr_obj;
       if (exitBarObj) exitBarObj.exit_sig = tr_obj;
 
-      // 1. Log ENTRY Event
       events.push({{
-        trade_id: tId,
-        event_type: "ENTRY OPEN",
-        bar_idx: i,
-        ts: b.ts,
-        t: b.t,
-        dir: tr_obj.dir,
-        action_label: `OPEN ${{tr_obj.dir}} (${{init_pct}}% Cap)`,
-        price: tr_obj.en,
-        sl: tr_obj.init_sl,
-        tp: tr_obj.tp,
-        conf: conf_pct,
-        pnl_pct: null,
-        detail: `AI Conf ${{conf_pct}}% | SL $${{tr_obj.init_sl.toFixed(1)}} | TP $${{tr_obj.tp.toFixed(1)}}`
+        trade_id: tId, event_type: "ENTRY OPEN", bar_idx: i, ts: b.ts, t: b.t, dir: tr_obj.dir,
+        action_label: `OPEN ${{tr_obj.dir}} (${{init_pct}}% Cap)`, price: tr_obj.en, sl: tr_obj.init_sl, tp: tr_obj.tp,
+        conf: conf_pct, pnl_pct: null, detail: `AI Conf ${{conf_pct}}% | SL $${{tr_obj.init_sl.toFixed(1)}} | TP $${{tr_obj.tp.toFixed(1)}}`
       }});
 
-      // 2. Log PYRAMID SCALE-IN Event (if triggered)
       if (pyramided && pyr_bar_idx > 0) {{
         events.push({{
-          trade_id: tId,
-          event_type: "SCALE-IN",
-          bar_idx: pyr_bar_idx,
-          ts: pyr_ts,
-          t: pyr_time_str,
-          dir: tr_obj.dir,
-          action_label: `PYRAMID +${{Math.round(CFG.pyr_pct)}}% (${{total_pct}}% Tot)`,
-          price: tr_obj.pyr_price,
-          sl: tr_obj.en,
-          tp: tr_obj.tp,
-          conf: conf_pct,
-          pnl_pct: null,
-          detail: `+0.50x ATR Reached -> SL Protected at Breakeven ($${{tr_obj.en.toFixed(1)}})`
+          trade_id: tId, event_type: "SCALE-IN", bar_idx: pyr_bar_idx, ts: pyr_ts, t: pyr_time_str, dir: tr_obj.dir,
+          action_label: `PYRAMID +${{Math.round(CFG.pyr_pct)}}% (${{total_pct}}% Tot)`, price: tr_obj.pyr_price, sl: tr_obj.en, tp: tr_obj.tp,
+          conf: conf_pct, pnl_pct: null, detail: `+0.50x ATR Reached -> SL Protected at Breakeven ($${{tr_obj.en.toFixed(1)}})`
         }});
       }}
 
-      // 3. Log POSITION CLOSED Event (at exact exit_ts!)
       if (status !== "LIVE OPEN") {{
         events.push({{
-          trade_id: tId,
-          event_type: "POSITION CLOSED",
-          bar_idx: exit_bar_idx,
-          ts: exitBarObj.ts,
-          t: exitBarObj.t,
-          dir: tr_obj.dir,
-          action_label: `CLOSE ${{tr_obj.dir}} (${{status}})`,
-          price: tr_obj.ex,
-          sl: tr_obj.final_sl,
-          tp: tr_obj.tp,
-          conf: conf_pct,
-          pnl_pct: tr_obj.ret,
-          detail: `Held ${{bars_held}} bars | Entry $${{tr_obj.en.toFixed(1)}} -> Exit $${{tr_obj.ex.toFixed(1)}}`
+          trade_id: tId, event_type: "POSITION CLOSED", bar_idx: exit_bar_idx, ts: exitBarObj.ts, t: exitBarObj.t, dir: tr_obj.dir,
+          action_label: `CLOSE ${{tr_obj.dir}} (${{status}})`, price: tr_obj.ex, sl: tr_obj.final_sl, tp: tr_obj.tp,
+          conf: conf_pct, pnl_pct: tr_obj.ret, detail: `Held ${{bars_held}} bars | Entry $${{tr_obj.en.toFixed(1)}} -> Exit $${{tr_obj.ex.toFixed(1)}}`
         }});
       }}
 
@@ -1115,7 +1215,6 @@ function computeSupportResistanceZones(vis) {{
   const N = vis.length;
   if (N < 16) return zones;
 
-  // 1. Major Structural Range High (Supply) & Range Low (Demand) Zones across visible window
   let maxH = -Infinity, maxIdx = 0;
   let minL = Infinity, minIdx = 0;
   let avgAtr = 0.0;
@@ -1126,47 +1225,32 @@ function computeSupportResistanceZones(vis) {{
   }});
   avgAtr = (avgAtr / N) || 3.0;
 
-  // Major Supply / Resistance Zone at Top
   zones.push({{
-    type: "RES",
-    major: true,
+    type: "RES", major: true,
     startIdx: Math.max(0, Math.min(maxIdx - 4, Math.floor(N * 0.05))),
-    endIdx: N - 1,
-    top: maxH + priceOffset,
-    bot: (maxH - 0.65 * avgAtr) + priceOffset,
+    endIdx: N - 1, top: maxH + priceOffset, bot: (maxH - 0.65 * avgAtr) + priceOffset,
     label: "MAJOR RESISTANCE / SUPPLY ZONE"
   }});
 
-  // Major Demand / Support Zone at Bottom
   zones.push({{
-    type: "SUP",
-    major: true,
+    type: "SUP", major: true,
     startIdx: Math.max(0, Math.min(minIdx - 4, Math.floor(N * 0.05))),
-    endIdx: N - 1,
-    top: (minL + 0.65 * avgAtr) + priceOffset,
-    bot: minL + priceOffset,
+    endIdx: N - 1, top: (minL + 0.65 * avgAtr) + priceOffset, bot: minL + priceOffset,
     label: "MAJOR SUPPORT / DEMAND ZONE"
   }});
 
-  // 2. Intermediate Swing Order-Block / S&R Regions (Staggered horizontal boxes like image_988d1c.jpg)
   const lb = Math.max(5, Math.min(12, Math.floor(N / 18)));
   const rawPivots = [];
-
   for (let i = lb; i < N - lb; i++) {{
     let isHigh = true, isLow = true;
     for (let k = i - lb; k <= i + lb; k++) {{
       if (vis[k].h > vis[i].h) isHigh = false;
       if (vis[k].l < vis[i].l) isLow = false;
     }}
-    if (isHigh && Math.abs(vis[i].h - maxH) > 0.7 * avgAtr) {{
-      rawPivots.push({{ type: "RES", idx: i, p: vis[i].h, atr: vis[i].atr }});
-    }}
-    if (isLow && Math.abs(vis[i].l - minL) > 0.7 * avgAtr) {{
-      rawPivots.push({{ type: "SUP", idx: i, p: vis[i].l, atr: vis[i].atr }});
-    }}
+    if (isHigh && Math.abs(vis[i].h - maxH) > 0.7 * avgAtr) rawPivots.push({{ type: "RES", idx: i, p: vis[i].h, atr: vis[i].atr }});
+    if (isLow && Math.abs(vis[i].l - minL) > 0.7 * avgAtr) rawPivots.push({{ type: "SUP", idx: i, p: vis[i].l, atr: vis[i].atr }});
   }}
 
-  // Filter non-overlapping intermediate zones and trace until broken or 55 bars forward
   const kept = [];
   rawPivots.forEach(pv => {{
     const tooClose = kept.some(k => Math.abs(k.p - pv.p) < 0.85 * avgAtr && Math.abs(k.idx - pv.idx) < lb * 3);
@@ -1180,22 +1264,13 @@ function computeSupportResistanceZones(vis) {{
 
     let endI = Math.min(N - 1, pv.idx + Math.max(28, Math.floor(N * 0.32)));
     for (let k = pv.idx + 3; k < N; k++) {{
-      if (pv.type === "RES" && (vis[k].c + priceOffset) > topP + 0.35 * pv.atr) {{
-        endI = k; break;
-      }}
-      if (pv.type === "SUP" && (vis[k].c + priceOffset) < botP - 0.35 * pv.atr) {{
-        endI = k; break;
-      }}
+      if (pv.type === "RES" && (vis[k].c + priceOffset) > topP + 0.35 * pv.atr) {{ endI = k; break; }}
+      if (pv.type === "SUP" && (vis[k].c + priceOffset) < botP - 0.35 * pv.atr) {{ endI = k; break; }}
     }}
     if (endI - pv.idx >= 8) {{
       zones.push({{
-        type: pv.type,
-        major: false,
-        startIdx: pv.idx,
-        endIdx: endI,
-        top: topP,
-        bot: botP,
-        label: pv.type === "RES" ? "Supply / Resistance" : "Demand / Support"
+        type: pv.type, major: false, startIdx: pv.idx, endIdx: endI,
+        top: topP, bot: botP, label: pv.type === "RES" ? "Supply / Resistance" : "Demand / Support"
       }});
     }}
   }});
@@ -1204,26 +1279,27 @@ function computeSupportResistanceZones(vis) {{
 }}
 
 // =========================================================================
-// 3. LIVE BINANCE REST + WEBSOCKET & LSE XAU/USD STREAMER (FIXED ASSET SWITCH!)
+// 3. LIVE BINANCE PAGINATED REST + WEBSOCKET ROLLOVER & LSE XAU/USD STREAMER
 // =========================================================================
 async function syncBinanceGapCandles() {{
   const statusEl = document.getElementById("syncLogStatus");
   if (statusEl) statusEl.textContent = "Fetching latest 15m candles from Binance...";
   try {{
-    const lastBar = ALL_15M_BARS[ALL_15M_BARS.length - 1];
-    const startMs = (lastBar.ts - 3600 * 6) * 1000;
-    const [rGold, rEur, rBtc] = await Promise.all([
-      fetch(`https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=15m&startTime=${{startMs}}&limit=500`).then(r => r.json()),
-      fetch(`https://api.binance.com/api/v3/klines?symbol=EURUSDT&interval=15m&startTime=${{startMs}}&limit=500`).then(r => r.json()),
-      fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&startTime=${{startMs}}&limit=500`).then(r => r.json())
-    ]);
+    let totalAdded = 0;
+    for (let page = 0; page < 5; page++) {{
+      const lastBar = ALL_15M_BARS[ALL_15M_BARS.length - 1];
+      const startMs = (page === 0 ? (lastBar.ts - 3600 * 3) : (lastBar.ts + 1)) * 1000;
+      const [rGold, rEur, rBtc] = await Promise.all([
+        fetch(`https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=15m&startTime=${{startMs}}&limit=1000`).then(r => r.json()),
+        fetch(`https://api.binance.com/api/v3/klines?symbol=EURUSDT&interval=15m&startTime=${{startMs}}&limit=1000`).then(r => r.json()),
+        fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=15m&startTime=${{startMs}}&limit=1000`).then(r => r.json())
+      ]);
+      if (!Array.isArray(rGold) || rGold.length === 0) break;
 
-    const eurMap = {{}}, btcMap = {{}};
-    if (Array.isArray(rEur)) rEur.forEach(k => eurMap[Math.floor(k[0] / 1000)] = parseFloat(k[4]));
-    if (Array.isArray(rBtc)) rBtc.forEach(k => btcMap[Math.floor(k[0] / 1000)] = parseFloat(k[4]));
+      const eurMap = {{}}, btcMap = {{}};
+      if (Array.isArray(rEur)) rEur.forEach(k => eurMap[Math.floor(k[0] / 1000)] = parseFloat(k[4]));
+      if (Array.isArray(rBtc)) rBtc.forEach(k => btcMap[Math.floor(k[0] / 1000)] = parseFloat(k[4]));
 
-    let added = 0;
-    if (Array.isArray(rGold)) {{
       rGold.forEach(k => {{
         const tsSec = Math.floor(k[0] / 1000);
         const o = parseFloat(k[1]), h = parseFloat(k[2]), l = parseFloat(k[3]), c = parseFloat(k[4]), v = parseFloat(k[5]);
@@ -1242,7 +1318,7 @@ async function syncBinanceGapCandles() {{
             i: ALL_15M_BARS.length, ts: tsSec,
             t: iso.slice(0, 16).replace("T", " "),
             d: iso.slice(0, 10), m: iso.slice(0, 7),
-            dow: dt.getUTCDay(),
+            hr: dt.getUTCHours(), dow: dt.getUTCDay(),
             o, h, l, c, v,
             atr: prev.atr, vwap: c, ema20: prev.ema20, ema60: prev.ema60, ema180: prev.ema180,
             bb_u: prev.bb_u, bb_d: prev.bb_d, er12: prev.er12, shock: 1.0,
@@ -1251,14 +1327,16 @@ async function syncBinanceGapCandles() {{
             f4: prev.f4, f6: prev.f6, f8: prev.f8, f9: prev.f9, vsa: prev.vsa, sig: null, exit_sig: null
           }});
           recomputeSingleBarIndicators(ALL_15M_BARS.length - 1);
-          added++;
+          totalAdded++;
         }}
       }});
+      if (rGold.length < 1000) break;
     }}
     runFastBrowserBacktest();
+    updateDatePickerBounds();
     onPeriodChange();
     const lastIso = ALL_15M_BARS[ALL_15M_BARS.length - 1].t;
-    if (statusEl) statusEl.textContent = `Synced (+${{added}} new bars). Latest candle: ${{lastIso}} UTC`;
+    if (statusEl) statusEl.textContent = `Synced (+${{totalAdded}} new bars). Latest candle: ${{lastIso}} UTC`;
     document.getElementById("binanceStatusTxt").textContent = `PAXG/USDT Synced (${{lastIso.slice(11)}} UTC)`;
   }} catch (err) {{
     if (statusEl) statusEl.textContent = "Live sync notice: " + err.message;
@@ -1331,19 +1409,44 @@ function startBinanceWebSocket() {{
       const k = msg.k;
       const tsSec = Math.floor(k.t / 1000);
       const lastBar = ALL_15M_BARS[ALL_15M_BARS.length - 1];
-      if (tsSec >= lastBar.ts) {{
+      const periodMode = document.getElementById("periodSelect").value;
+
+      if (tsSec === lastBar.ts) {{
+        lastBar.o = parseFloat(k.o);
         lastBar.c = parseFloat(k.c);
         lastBar.h = Math.max(lastBar.h, parseFloat(k.h));
         lastBar.l = Math.min(lastBar.l, parseFloat(k.l));
         lastBar.v = parseFloat(k.v);
         recomputeSingleBarIndicators(ALL_15M_BARS.length - 1);
-        if (cursorIdx === displayBars.length - 1) {{
-          displayBars[displayBars.length - 1].c = lastBar.c;
-          displayBars[displayBars.length - 1].h = Math.max(displayBars[displayBars.length - 1].h, lastBar.h);
-          displayBars[displayBars.length - 1].l = Math.min(displayBars[displayBars.length - 1].l, lastBar.l);
-          displayBars[displayBars.length - 1].p_up = lastBar.p_up;
+        if (cursorIdx === displayBars.length - 1 && periodMode !== "CUSTOM" && periodMode !== "YESTERDAY") {{
+          const dLast = displayBars[displayBars.length - 1];
+          dLast.c = lastBar.c;
+          dLast.h = Math.max(dLast.h, lastBar.h);
+          dLast.l = Math.min(dLast.l, lastBar.l);
+          dLast.p_up = lastBar.p_up;
           updatePriceOffsetForSelectedAsset();
           renderDashboard();
+        }}
+      }} else if (tsSec > lastBar.ts) {{
+        const dt = new Date(tsSec * 1000);
+        const iso = dt.toISOString();
+        ALL_15M_BARS.push({{
+          i: ALL_15M_BARS.length, ts: tsSec,
+          t: iso.slice(0, 16).replace("T", " "),
+          d: iso.slice(0, 10), m: iso.slice(0, 7),
+          hr: dt.getUTCHours(), dow: dt.getUTCDay(),
+          o: parseFloat(k.o), h: parseFloat(k.h), l: parseFloat(k.l), c: parseFloat(k.c), v: parseFloat(k.v),
+          atr: lastBar.atr, vwap: parseFloat(k.c), ema20: lastBar.ema20, ema60: lastBar.ema60, ema180: lastBar.ema180,
+          bb_u: lastBar.bb_u, bb_d: lastBar.bb_d, er12: lastBar.er12, shock: 1.0,
+          p_up: lastBar.p_up, p_lr: lastBar.p_lr, p_mlp: lastBar.p_mlp,
+          eur: lastBar.eur, btc: lastBar.btc, rsi: lastBar.rsi,
+          f4: lastBar.f4, f6: lastBar.f6, f8: lastBar.f8, f9: lastBar.f9, vsa: lastBar.vsa, sig: null, exit_sig: null
+        }});
+        recomputeSingleBarIndicators(ALL_15M_BARS.length - 1);
+        runFastBrowserBacktest();
+        updateDatePickerBounds();
+        if (periodMode !== "CUSTOM" && periodMode !== "YESTERDAY") {{
+          onPeriodChange();
         }}
       }}
     }};
@@ -1352,7 +1455,6 @@ function startBinanceWebSocket() {{
   }}
 }}
 
-// FIXED: LSE WebSocket updates XAU price in background WITHOUT hijacking assetSelect dropdown!
 function connectLseWebSocket() {{
   const key = document.getElementById("lseApiKeyInput").value.trim();
   if (!key) {{
@@ -1393,11 +1495,8 @@ function connectLseWebSocket() {{
         const price = parseFloat(msg.price);
         if (sym.includes("XAU") && !isNaN(price)) {{
           liveSpotXauPrice = price;
-          if (msg.bid && msg.ask) {{
-            liveXauSpread = Math.abs(parseFloat(msg.ask) - parseFloat(msg.bid));
-          }}
+          if (msg.bid && msg.ask) liveXauSpread = Math.abs(parseFloat(msg.ask) - parseFloat(msg.bid));
           document.getElementById("lseStatusTxt").textContent = `LSE XAU: $${{price.toFixed(2)}}`;
-          // Only re-render XAU offset if user currently has XAU selected!
           if (selectedAsset === "XAU") {{
             updatePriceOffsetForSelectedAsset();
             renderDashboard();
@@ -1419,7 +1518,6 @@ function updatePriceOffsetForSelectedAsset() {{
   const lastC = ALL_15M_BARS[ALL_15M_BARS.length - 1].c;
   if (selectedAsset === "XAU") {{
     let rawDiff = liveSpotXauPrice ? (liveSpotXauPrice - lastC) : 1.85;
-    // Guard against extreme scale mismatch so historical chart never distorts
     if (Math.abs(rawDiff) > 150) rawDiff = 1.85;
     priceOffset = rawDiff;
     document.getElementById("activeAssetTag").textContent = "XAU/USD (SPOT)";
@@ -1447,8 +1545,99 @@ function closeApiModal(e) {{
 }}
 
 // =========================================================================
-// 4. UI CONTROLS, TIMEFRAME AGGREGATION & RENDERING
+// 4. DAILY INSPECTOR, CUSTOM RANGE, JOURNAL NOTES & CSV EXPORT
 // =========================================================================
+function updateDatePickerBounds() {{
+  if (!ALL_15M_BARS.length) return;
+  const minD = ALL_15M_BARS[0].d;
+  const maxD = ALL_15M_BARS[ALL_15M_BARS.length - 1].d;
+  const picker = document.getElementById("dailyDatePicker");
+  picker.min = minD;
+  picker.max = maxD;
+  if (!picker.value) picker.value = maxD;
+}}
+
+function jumpToSingleDay(dateStr) {{
+  if (!dateStr) return;
+  const startTs = Math.floor(Date.parse(dateStr + "T00:00:00Z") / 1000);
+  const endTs = Math.floor(Date.parse(dateStr + "T23:59:59Z") / 1000);
+  if (isNaN(startTs) || isNaN(endTs)) return;
+  customStartTs = startTs;
+  customEndTs = endTs;
+  document.getElementById("dailyDatePicker").value = dateStr;
+  document.getElementById("customStartInput").value = dateStr + "T00:00";
+  document.getElementById("customEndInput").value = dateStr + "T23:59";
+  document.getElementById("periodSelect").value = "CUSTOM";
+  onPeriodChange();
+}}
+
+function stepSingleDay(deltaDays) {{
+  let curDateStr = document.getElementById("dailyDatePicker").value;
+  if (!curDateStr && filtered15mBars.length) curDateStr = filtered15mBars[filtered15mBars.length - 1].d;
+  const dt = new Date(curDateStr + "T00:00:00Z");
+  dt.setUTCDate(dt.getUTCDate() + deltaDays);
+  const nextStr = dt.toISOString().slice(0, 10);
+  const minD = ALL_15M_BARS[0].d;
+  const maxD = ALL_15M_BARS[ALL_15M_BARS.length - 1].d;
+  if (nextStr < minD || nextStr > maxD) return;
+  jumpToSingleDay(nextStr);
+}}
+
+function jumpToToday() {{
+  document.getElementById("periodSelect").value = "TODAY";
+  onPeriodChange();
+}}
+
+function applyCustomDateRange() {{
+  const sTs = utcInputValToTs(document.getElementById("customStartInput").value);
+  const eTs = utcInputValToTs(document.getElementById("customEndInput").value);
+  if (!sTs || !eTs || sTs >= eTs) {{
+    alert("Please choose a Start Date/Time earlier than the End Date/Time.");
+    return;
+  }}
+  customStartTs = sTs;
+  customEndTs = eTs;
+  document.getElementById("periodSelect").value = "CUSTOM";
+  onPeriodChange();
+}}
+
+function openJournalModal() {{
+  const curDate = document.getElementById("dailyDatePicker").value || ALL_15M_BARS[ALL_15M_BARS.length - 1].d;
+  document.getElementById("journalDateTitle").textContent = curDate;
+  document.getElementById("journalMetricsSnapshot").textContent = lastKpiSummary;
+  document.getElementById("journalNoteInput").value = localStorage.getItem("GOLD_JOURNAL_" + curDate) || "";
+  document.getElementById("journalSaveStatus").textContent = "Loaded note for " + curDate;
+  document.getElementById("journalModal").classList.add("open");
+}}
+
+function saveDailyJournalNote() {{
+  const curDate = document.getElementById("journalDateTitle").textContent;
+  const txt = document.getElementById("journalNoteInput").value;
+  localStorage.setItem("GOLD_JOURNAL_" + curDate, txt);
+  document.getElementById("journalSaveStatus").textContent = "Saved note for " + curDate + "!";
+}}
+
+function exportWindowCSV() {{
+  const headers = ["Trade_ID", "Asset", "Entry_UTC", "Exit_UTC", "Direction", "Tier", "Entry_Price", "Exit_Price", "AI_Conf_Pct", "Net_Return_Pct", "Status"];
+  const rows = lastRenderedPeriodTrades.map(tr => [
+    tr.id, selectedAsset, tr.t, tr.exit_t, tr.dir, `"${{tr.tier}}"`,
+    (tr.en + priceOffset).toFixed(2), (tr.ex + priceOffset).toFixed(2),
+    tr.prob.toFixed(1), tr.ret.toFixed(3), `"${{tr.st}}"`
+  ].join(","));
+  const csv = [headers.join(","), ...rows].join("\\n");
+  const blob = new Blob([csv], {{ type: "text/csv;charset=utf-8;" }});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const startD = filtered15mBars.length ? filtered15mBars[0].d : "start";
+  const endD = filtered15mBars.length ? filtered15mBars[filtered15mBars.length - 1].d : "end";
+  a.href = url;
+  a.download = `gold_ai_journal_${{selectedAsset}}_${{startD}}_to_${{endD}}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}}
+
 window.addEventListener("click", () => {{
   const pop = document.getElementById("indicatorPopover");
   if (pop) pop.classList.remove("open");
@@ -1486,9 +1675,26 @@ function aggregateBars(bars15m, groupSize) {{
 
 function onPeriodChange() {{
   const period = document.getElementById("periodSelect").value;
-  const maxTs = ALL_15M_BARS[ALL_15M_BARS.length - 1].ts;
+  const latestBar = ALL_15M_BARS[ALL_15M_BARS.length - 1];
+  const maxTs = latestBar.ts;
+  const latestDateStr = latestBar.d;
 
-  if (period === "1Y") {{
+  if (period === "TODAY") {{
+    filtered15mBars = ALL_15M_BARS.filter(b => b.d === latestDateStr);
+  }} else if (period === "YESTERDAY") {{
+    const dt = new Date(latestDateStr + "T00:00:00Z");
+    dt.setUTCDate(dt.getUTCDate() - 1);
+    const yestStr = dt.toISOString().slice(0, 10);
+    filtered15mBars = ALL_15M_BARS.filter(b => b.d === yestStr);
+  }} else if (period === "LAST_24H") {{
+    filtered15mBars = ALL_15M_BARS.filter(b => b.ts >= maxTs - 86400);
+  }} else if (period === "LAST_3D") {{
+    filtered15mBars = ALL_15M_BARS.filter(b => b.ts >= maxTs - (3 * 86400));
+  }} else if (period === "LAST_7D") {{
+    filtered15mBars = ALL_15M_BARS.filter(b => b.ts >= maxTs - (7 * 86400));
+  }} else if (period === "LAST_30D") {{
+    filtered15mBars = ALL_15M_BARS.filter(b => b.ts >= maxTs - (30 * 86400));
+  }} else if (period === "1Y") {{
     filtered15mBars = ALL_15M_BARS;
   }} else if (period === "6M") {{
     filtered15mBars = ALL_15M_BARS.filter(b => b.ts >= maxTs - (182 * 86400));
@@ -1496,29 +1702,38 @@ function onPeriodChange() {{
     filtered15mBars = ALL_15M_BARS.filter(b => b.d >= "2026-09-01");
   }} else if (period === "OOS_WEEK") {{
     filtered15mBars = ALL_15M_BARS.filter(b => b.d >= "2026-11-09");
+  }} else if (period === "CUSTOM" && customStartTs && customEndTs) {{
+    filtered15mBars = ALL_15M_BARS.filter(b => b.ts >= customStartTs && b.ts <= customEndTs);
   }} else {{
-    filtered15mBars = ALL_15M_BARS.filter(b => b.d === period);
+    filtered15mBars = ALL_15M_BARS.slice(-672);
   }}
-  if (filtered15mBars.length === 0) filtered15mBars = ALL_15M_BARS.slice(-600);
+
+  if (filtered15mBars.length === 0) filtered15mBars = ALL_15M_BARS.slice(-96);
+
+  const fFirst = filtered15mBars[0];
+  const fLast = filtered15mBars[filtered15mBars.length - 1];
+  document.getElementById("dailyDatePicker").value = fLast.d;
+  document.getElementById("customStartInput").value = tsToUtcInputVal(fFirst.ts);
+  document.getElementById("customEndInput").value = tsToUtcInputVal(fLast.ts);
+  document.getElementById("activeWindowSummary").textContent =
+    `${{fFirst.t.slice(5)}} → ${{fLast.t.slice(5)}} (${{filtered15mBars.length}} bars)`;
+
   rebuildDisplayBars();
 }}
 
 function onTimeframeChange() {{ rebuildDisplayBars(); }}
 
 function rebuildDisplayBars() {{
-  const period = document.getElementById("periodSelect").value;
   let tf = document.getElementById("tfSelect").value;
   if (tf === "AUTO") {{
-    if (period === "1Y") tf = "1D";
-    else if (period === "6M") tf = "4H";
-    else if (period === "SEP_NOV") tf = "1H";
+    const spanDays = (filtered15mBars[filtered15mBars.length - 1].ts - filtered15mBars[0].ts) / 86400.0;
+    if (spanDays > 200) tf = "1D";
+    else if (spanDays > 60) tf = "4H";
+    else if (spanDays > 18) tf = "1H";
+    else if (spanDays > 8) tf = "30m";
     else tf = "15m";
   }}
-  let groupSize = 1;
-  if (tf === "1H") groupSize = 4;
-  else if (tf === "4H") groupSize = 16;
-  else if (tf === "1D") groupSize = 96;
-
+  const groupSize = getGroupSize(tf);
   activeTfLabel = tf;
   document.getElementById("activeTfBadge").textContent = `${{tf}} Candles (${{filtered15mBars.length}} raw 15m bars)`;
   displayBars = aggregateBars(filtered15mBars, groupSize);
@@ -1573,8 +1788,7 @@ function setAuditTab(tab) {{
 function applySettingChange(key, val, isBool=false) {{
   CFG[key] = isBool ? Boolean(val) : (isNaN(Number(val)) ? val : Number(val));
   runFastBrowserBacktest();
-  const groupSize = activeTfLabel === "1D" ? 96 : (activeTfLabel === "4H" ? 16 : (activeTfLabel === "1H" ? 4 : 1));
-  displayBars = aggregateBars(filtered15mBars, groupSize);
+  displayBars = aggregateBars(filtered15mBars, getGroupSize(activeTfLabel));
   renderDashboard();
 }}
 
@@ -1591,10 +1805,8 @@ function resetDefaultSettings() {{
   rebuildDisplayBars();
 }}
 
-// Find if a position is currently open at timestamp curTs
 function findActivePositionAt(curBar) {{
   const curTs = curBar.ts;
-  // A trade is currently open if curTs >= tr.ts and curTs < tr.exit_ts (or if it entered on this exact bar)
   for (let k = SIM_TRADES.length - 1; k >= 0; k--) {{
     const tr = SIM_TRADES[k];
     if (curTs >= tr.ts && curTs < tr.exit_ts) {{
@@ -1604,14 +1816,8 @@ function findActivePositionAt(curBar) {{
       const rawRet = tr.dir_num * ((curBar.c - tr.en) / tr.en) * (eqPct / 100.0) * 100.0;
       const activeSl = isScaled ? Math.max(tr.init_sl, tr.en) : (tr.ratchet_locked ? tr.final_sl : tr.init_sl);
       return {{
-        open: true,
-        tr: tr,
-        barsElapsed: barsElapsed,
-        eqPct: eqPct,
-        isScaled: isScaled,
-        floatingPct: rawRet,
-        floatingUsd: rawRet * 100.0,
-        activeSl: activeSl
+        open: true, tr, barsElapsed, eqPct, isScaled,
+        floatingPct: rawRet, floatingUsd: rawRet * 100.0, activeSl
       }};
     }}
   }}
@@ -1629,7 +1835,6 @@ function renderOnChartPositionHud(curBar, zones) {{
   const pos = findActivePositionAt(curBar);
   const cPrice = curBar.c + priceOffset;
 
-  // Find nearest Resistance zone above and Support zone below
   let nearRes = null, nearSup = null;
   zones.forEach(z => {{
     if (z.type === "RES" && z.bot >= cPrice - 2.0) {{
@@ -1646,7 +1851,6 @@ function renderOnChartPositionHud(curBar, zones) {{
   if (pos.open) {{
     const tr = pos.tr;
     const isLong = tr.dir === "LONG";
-    const flCol = pos.floatingPct >= 0 ? "up" : "down";
     hud.innerHTML = `
       <div class="hud-header-line">
         <span>POSITION: <b class="${{isLong ? 'up' : 'down'}}">● ${{tr.dir}} ACTIVE (${{pos.eqPct}}% Cap)</b></span>
@@ -1780,7 +1984,6 @@ function drawMainChart() {{
   const yOf = (p) => padT + plotH - ((p - minP) / rangeP) * plotH;
   const xOf = (idx) => padL + ((idx + 0.5) / totalCols) * plotW;
 
-  // 1. Horizontal Grid & Right Price Axis
   ctx.strokeStyle = gridCol;
   ctx.lineWidth = 1;
   ctx.font = "500 11.5px 'JetBrains Mono', monospace";
@@ -1793,23 +1996,17 @@ function drawMainChart() {{
     ctx.fillText("$" + pVal.toFixed(1), W - padR + 8, y + 4);
   }}
 
-  // 2. SUPPORT/DEMAND (GREEN) & RESISTANCE/SUPPLY (RED) SHADED REGIONS (image_988d1c.jpg style!)
   if (document.getElementById("chkSRZones").checked) {{
     zones.forEach(z => {{
-      const x1 = xOf(z.startIdx);
-      const x2 = xOf(z.endIdx);
-      const yTop = yOf(z.top);
-      const yBot = yOf(z.bot);
-      const boxH = Math.max(4, yBot - yTop);
-      const boxW = Math.max(12, x2 - x1);
-
+      const x1 = xOf(z.startIdx), x2 = xOf(z.endIdx);
+      const yTop = yOf(z.top), yBot = yOf(z.bot);
+      const boxH = Math.max(4, yBot - yTop), boxW = Math.max(12, x2 - x1);
       const isRes = z.type === "RES";
       ctx.fillStyle = isRes
         ? (z.major ? "rgba(225, 29, 72, 0.12)" : "rgba(225, 29, 72, 0.08)")
         : (z.major ? "rgba(5, 150, 105, 0.12)" : "rgba(5, 150, 105, 0.08)");
       ctx.fillRect(x1, yTop, boxW, boxH);
 
-      // Crisp Top & Bottom Horizontal Borders + Left Anchor Border
       ctx.strokeStyle = isRes ? "rgba(225, 29, 72, 0.55)" : "rgba(5, 150, 105, 0.55)";
       ctx.lineWidth = z.major ? 1.4 : 1.0;
       ctx.beginPath();
@@ -1818,12 +2015,10 @@ function drawMainChart() {{
       ctx.moveTo(x1, yTop); ctx.lineTo(x1, yBot);
       ctx.stroke();
 
-      // Subtle Zone Tag inside the rectangle
       if (boxW > 95 && boxH >= 10) {{
         ctx.fillStyle = isRes ? dnCol : upCol;
         ctx.font = "600 9.5px 'JetBrains Mono', monospace";
-        const tag = `${{z.label}} ($${{z.bot.toFixed(0)}}-$${{z.top.toFixed(0)}})`;
-        ctx.fillText(tag, x1 + 5, isRes ? yTop + 10 : yBot - 3);
+        ctx.fillText(`${{z.label}} ($${{z.bot.toFixed(0)}}-$${{z.top.toFixed(0)}})`, x1 + 5, isRes ? yTop + 10 : yBot - 3);
       }}
     }});
   }}
@@ -1866,8 +2061,6 @@ function drawMainChart() {{
   const chartStyle = document.getElementById("chartStyleSelect").value;
   const showPaths = document.getElementById("chkTradePaths").checked;
   const barW = Math.max(1.5, Math.min(11, (plotW / totalCols) * 0.68));
-
-  // Build map from timestamp to visible index for drawing Trade Path Connectors
   const tsToVisIdx = {{}};
   vis.forEach((b, idx) => {{ tsToVisIdx[b.ts] = idx; }});
 
@@ -1904,7 +2097,6 @@ function drawMainChart() {{
         ctx.stroke();
       }}
 
-      // Draw Entry Triangle & Trade Path Connector Line to Exit
       if (b.sig) {{
         const tr = b.sig;
         const isLong = tr.dir === "LONG";
@@ -1926,15 +2118,10 @@ function drawMainChart() {{
           ctx.strokeStyle = tr.ret >= 0 ? upCol : dnCol;
           ctx.lineWidth = 1.4;
           ctx.setLineDash([3, 3]);
-          ctx.beginPath();
-          ctx.moveTo(x, yEntry);
-          ctx.lineTo(xExit, yExit);
-          ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(x, yEntry); ctx.lineTo(xExit, yExit); ctx.stroke();
           ctx.setLineDash([]);
           ctx.fillStyle = tr.ret >= 0 ? upCol : dnCol;
-          ctx.beginPath();
-          ctx.arc(xExit, yExit, 3.2, 0, Math.PI * 2);
-          ctx.fill();
+          ctx.beginPath(); ctx.arc(xExit, yExit, 3.2, 0, Math.PI * 2); ctx.fill();
         }}
       }}
     }});
@@ -2141,10 +2328,7 @@ function renderBottomAnalytics() {{
   const maxTs = displayBars[cursorIdx].ts;
   const curClose = displayBars[cursorIdx].c;
 
-  // Filter trades that opened within [minTs, maxTs]
   const rawPeriodTrades = SIM_TRADES.filter(tr => tr.ts >= minTs && tr.ts <= maxTs);
-
-  // Respect causality: if tr.exit_ts > maxTs, the trade is STILL OPEN at the replay cursor!
   const periodTrades = rawPeriodTrades.map(tr => {{
     if (tr.exit_ts <= maxTs) {{
       return {{ ...tr, is_open: false }};
@@ -2153,15 +2337,12 @@ function renderBottomAnalytics() {{
       const eqW = (isScaled ? tr.total_pct : tr.init_pct) / 100.0;
       const flRet = Number((tr.dir_num * ((curClose - tr.en) / tr.en) * eqW * 100.0).toFixed(3));
       return {{
-        ...tr,
-        is_open: true,
-        ex: Number(curClose.toFixed(2)),
-        exit_t: "OPEN (ACTIVE)",
-        ret: flRet,
-        st: "ACTIVE FLOATING"
+        ...tr, is_open: true, ex: Number(curClose.toFixed(2)),
+        exit_t: "OPEN (ACTIVE)", ret: flRet, st: "ACTIVE FLOATING"
       }};
     }}
   }});
+  lastRenderedPeriodTrades = periodTrades;
 
   const wins = periodTrades.filter(t => t.ret > 0);
   const losses = periodTrades.filter(t => t.ret <= 0);
@@ -2183,6 +2364,7 @@ function renderBottomAnalytics() {{
   const lastP  = displayBars[cursorIdx].c;
   const bhRet  = ((lastP - firstP) / (firstP || 1)) * 100.0;
   const alpha  = netPnl - bhRet;
+  lastKpiSummary = `${{selectedAsset}} | Trades: ${{periodTrades.length}} | Win: ${{winRate}}% | Net: ${{netPnl >= 0 ? '+' : ''}}${{netPnl.toFixed(2)}}% | MaxDD: -${{maxDD.toFixed(2)}}% | PF: ${{pf}}`;
 
   document.getElementById("kpiGrid").innerHTML = `
     <div class="kpi-card">
@@ -2214,15 +2396,16 @@ function renderBottomAnalytics() {{
 
   drawEquityCurve(eq, bhRet);
 
-  const periodVal = document.getElementById("periodSelect").value;
-  const groupByMonth = (periodVal === "1Y" || periodVal === "6M");
-  document.getElementById("breakdownTableTitle").textContent = groupByMonth
-    ? "Monthly Performance Breakdown (1Y / 6M View)"
-    : "Day-by-Day Performance Breakdown";
+  const spanDays = (maxTs - minTs) / 86400.0;
+  const mode = spanDays > 90 ? "MONTH" : (spanDays > 2.0 ? "DAY" : "SESSION");
+
+  document.getElementById("breakdownTableTitle").textContent =
+    mode === "MONTH" ? "Monthly Performance Breakdown" :
+    (mode === "DAY" ? "Day-by-Day Performance Breakdown (Click a Date to Inspect)" : "Intraday Session Breakdown (Daily View)");
 
   document.getElementById("breakdownThead").innerHTML = `
     <tr>
-      <th>${{groupByMonth ? 'Month' : 'Date'}}</th>
+      <th>${{mode === "MONTH" ? "Month" : (mode === "DAY" ? "Date" : "Trading Session (UTC)")}}</th>
       <th class="num">Trades</th>
       <th class="num">Winners</th>
       <th class="num">Win Rate</th>
@@ -2233,7 +2416,7 @@ function renderBottomAnalytics() {{
 
   const groups = {{}};
   periodTrades.forEach(tr => {{
-    const key = groupByMonth ? tr.m : tr.d;
+    const key = mode === "MONTH" ? tr.m : (mode === "DAY" ? tr.d : getSessionBucket(tr.hr));
     if (!groups[key]) groups[key] = [];
     groups[key].push(tr);
   }});
@@ -2245,7 +2428,8 @@ function renderBottomAnalytics() {{
     const wr = ((w / g.length) * 100).toFixed(1);
     const p = g.reduce((a, b) => a + b.ret, 0);
     runCum += p;
-    return `<tr>
+    const clickAttr = mode === "DAY" ? `class="clickable-row" onclick="jumpToSingleDay('${{k}}')"` : "";
+    return `<tr ${{clickAttr}}>
       <td class="mono" style="font-weight:600;">${{k}}</td>
       <td class="num">${{g.length}}</td>
       <td class="num">${{w}}</td>
@@ -2257,7 +2441,6 @@ function renderBottomAnalytics() {{
 
   const auditBox = document.getElementById("auditBody");
 
-  // TAB 1: FULL LIFECYCLE EVENT LOG (OPEN ENTRY + PYRAMID SCALE-IN + POSITION CLOSED LOGS!)
   if (auditTab === "events") {{
     const visEvents = EXEC_EVENTS.filter(ev => ev.ts >= minTs && ev.ts <= maxTs).slice().reverse().slice(0, 300);
     const evRows = visEvents.map(ev => {{
@@ -2285,13 +2468,8 @@ function renderBottomAnalytics() {{
       <table class="clean-table">
         <thead>
           <tr>
-            <th>ID</th>
-            <th>Event Timestamp</th>
-            <th>Lifecycle Stage</th>
-            <th>Execution Action</th>
-            <th class="num">Exec Price</th>
-            <th class="num">Realized P&L</th>
-            <th>Bracket & Execution Details</th>
+            <th>ID</th><th>Event Timestamp</th><th>Lifecycle Stage</th><th>Execution Action</th>
+            <th class="num">Exec Price</th><th class="num">Realized P&L</th><th>Bracket & Execution Details</th>
           </tr>
         </thead>
         <tbody>${{evRows || '<tr><td colspan="7" style="text-align:center;">No execution events in window</td></tr>'}}</tbody>
@@ -2417,6 +2595,7 @@ function drawEquityCurve(eqArr, finalBh) {{
 window.addEventListener("resize", renderDashboard);
 window.onload = () => {{
   runFastBrowserBacktest();
+  updateDatePickerBounds();
   onPeriodChange();
   syncBinanceGapCandles();
   startBinanceWebSocket();
